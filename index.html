@@ -725,10 +725,23 @@
     }
 
     function syncLevelFromRemote(newRects) {
-      let selectedIndices = selectedRects.map(r => rectangles.indexOf(r)).filter(i => i !== -1);
-      rectangles = newRects;
-      selectedIndices = selectedIndices.map(i => rectangles[i]).filter(i => i < rectangles.length && rectangles[i]);
+      // The payload is a whole new array of new objects, so the selection holds
+      // references that are no longer in `rectangles` and the editor would keep
+      // drawing and dragging stale rects. Re-point the selection at the same
+      // positions in the new array, including an in-flight rotation.
+      const previousSelected = selectedRects.slice();
+      const remap = (rect) => {
+        const idx = rect ? previousSelected.indexOf(rect) : -1;
+        return idx === -1 ? null : newRects[idx];
+      };
+
+      const wasRotatingThis = rotationStartRect != null &&
+        previousSelected.indexOf(rotationStartRect) !== -1;
+      if (wasRotatingThis) rotationStartRect = remap(rotationStartRect);
+
+      selectedRects = previousSelected.map(remap).filter(r => r != null);
       selectedRect = selectedRects.length > 0 ? selectedRects[0] : null;
+      rectangles = newRects;
     }
 
     function sendDeathEvent(x, y) {
@@ -1800,7 +1813,7 @@
     let isPanning = false;
     let dragOffset = { x: 0, y: 0 };
     let panStart = { x: 0, y: 0 };
-    let resizeInitial = { x: 0, y: 0, w: 0, h: 0 };
+    let resizeInitial = { x: 0, y: 0, w: 0, h: 0, rotation: 0 };
     let clipboard = null;
     let isSelecting = false;
     let selectionStart = { x: 0, y: 0 };
@@ -2073,6 +2086,20 @@
       return Math.atan2(clientY - sp.y, clientX - sp.x);
     }
 
+    // Geometry the resize drag measures against, frozen at mousedown. The
+    // inverse transform must never see the live w/h: a rotated rect's centre is
+    // derived from its size, so writing the measured size straight back feeds it
+    // into the next pointer move and the rect compounds until it fills the world.
+    function getResizeBaseRect() {
+      return {
+        x: resizeInitial.x,
+        y: resizeInitial.y,
+        w: resizeInitial.w,
+        h: resizeInitial.h,
+        rotation: resizeInitial.rotation
+      };
+    }
+
     // Sets the canvas transform so the rect can be drawn in its own local
     // space (0,0 to w,h), with camera offset applied.
     function setRectCanvasTransform(rect, camX = 0, camY = 0) {
@@ -2264,7 +2291,7 @@
           if (corner) {
             saveEditorState();
             resizeHandle = corner;
-            resizeInitial = { x: rect.x, y: rect.y, w: rect.w, h: rect.h };
+            resizeInitial = { x: rect.x, y: rect.y, w: rect.w, h: rect.h, rotation: getRectRotation(rect) };
             selectedRect = rect;
             return;
           }
@@ -2369,7 +2396,7 @@
       if (resizeHandle && selectedRect) {
         // Corners are dragged in the rect's own space, so resizing a rotated
         // rect keeps its rotation.
-        const cursor = worldToRect(selectedRect, mouseWorld.x, mouseWorld.y);
+        const cursor = worldToRect(getResizeBaseRect(), mouseWorld.x, mouseWorld.y);
 
         let left = resizeInitial.x;
         let right = resizeInitial.x + resizeInitial.w;
@@ -2600,7 +2627,7 @@
             if (corner) {
               saveEditorState();
               resizeHandle = corner;
-              resizeInitial = { x: rect.x, y: rect.y, w: rect.w, h: rect.h };
+              resizeInitial = { x: rect.x, y: rect.y, w: rect.w, h: rect.h, rotation: getRectRotation(rect) };
               selectedRect = rect;
               return;
             }
@@ -2699,7 +2726,7 @@
             sendLevelSync();
           }
         } else if (resizeHandle && selectedRect) {
-          const cursor = worldToRect(selectedRect, mouseWorld.x, mouseWorld.y);
+          const cursor = worldToRect(getResizeBaseRect(), mouseWorld.x, mouseWorld.y);
 
           let left = resizeInitial.x;
           let right = resizeInitial.x + resizeInitial.w;
