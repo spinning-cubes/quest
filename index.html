@@ -1156,10 +1156,13 @@
         }
       }
 
-      p.leg1.x += (target1X - p.leg1.x) * 0.35;
-      p.leg1.y += (target1Y - p.leg1.y) * 0.35;
-      p.leg2.x += (target2X - p.leg2.x) * 0.35;
-      p.leg2.y += (target2Y - p.leg2.y) * 0.35;
+      // Same easing as before at 60Hz, just scaled to the real frame length so
+      // the legs settle at the same visual rate on any display.
+      const legEase = 1 - Math.pow(1 - 0.35, renderScale);
+      p.leg1.x += (target1X - p.leg1.x) * legEase;
+      p.leg1.y += (target1Y - p.leg1.y) * legEase;
+      p.leg2.x += (target2X - p.leg2.x) * legEase;
+      p.leg2.y += (target2Y - p.leg2.y) * legEase;
 
       ctx.save();
       // Your own runner stays solid so you can pick yourself out of a crowd.
@@ -1719,8 +1722,35 @@
       }
     }
 
-    function gameLoop() {
-      update();
+    // Physics runs on a fixed step so the tuned constants (and the collision
+    // windows that depend on a known step size) behave identically on a 60Hz
+    // laptop and a 144Hz monitor, instead of everything scaling with the
+    // display's refresh rate.
+    const FIXED_TIMESTEP = 1000 / 60;
+    const MAX_FRAME_TIME = 250; // longer stalls are dropped, not simulated
+    let accumulator = 0;
+    let lastFrameTime = 0;
+    let renderScale = 1; // frame length relative to one fixed step
+
+    function gameLoop(now) {
+      let frameTime;
+      if (!lastFrameTime) {
+        // First frame: step once so there is a world to draw.
+        frameTime = FIXED_TIMESTEP;
+      } else {
+        // A backgrounded tab, a long GC pause or a breakpoint would otherwise
+        // be simulated all in one go and fling the player through walls.
+        frameTime = Math.min(now - lastFrameTime, MAX_FRAME_TIME);
+      }
+      lastFrameTime = now;
+      renderScale = frameTime / FIXED_TIMESTEP;
+      accumulator += frameTime;
+
+      while (accumulator >= FIXED_TIMESTEP) {
+        update();
+        accumulator -= FIXED_TIMESTEP;
+      }
+
       render();
       requestAnimationFrame(gameLoop);
     }
@@ -2726,7 +2756,7 @@
     window.onload = async function () {
       await loadDefaultLevel();
       restartGame();
-      gameLoop();
+      requestAnimationFrame(gameLoop);
     };
   </script>
 </body>
