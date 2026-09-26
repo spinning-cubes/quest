@@ -129,6 +129,11 @@
 
     let cameraX = 0;
     let cameraY = 0;
+    // Camera drawn this frame, blended between the last two physics steps.
+    let renderCameraX = 0;
+    let renderCameraY = 0;
+    let prevCameraX = 0;
+    let prevCameraY = 0;
     let editorCamX = 0;
     let editorCamY = 0;
     let editorZoom = 1.0;
@@ -221,6 +226,12 @@
     const player = {
       x: 0,
       y: 0,
+      // State either side of the last physics step, blended by the leftover
+      // accumulator so drawing is smooth above the 60Hz simulation rate.
+      prevX: 0,
+      prevY: 0,
+      renderX: 0,
+      renderY: 0,
       vx: 0,
       vy: 0,
       maxSpeed: 4.2,
@@ -1091,8 +1102,10 @@
       player.y = pivotY + dx * sin + dy * cos;
     }
 
-    function drawPlayer(p, camX, camY = 0) {
-      const screenX = p.x - camX;
+    // posX/posY default to the simulated position; the local player passes the
+    // interpolated one so drawing is not quantised to the 60Hz step.
+    function drawPlayer(p, camX, camY = 0, posX = p.x, posY = p.y) {
+      const screenX = posX - camX;
       
       const headRadius = PLAYER_HEAD_RADIUS;
       const legWidth = PLAYER_LEG_WIDTH;
@@ -1103,13 +1116,13 @@
       const currentLegHeight = getPlayerLegHeight(p.crouchFactor);
       
       const hipX = screenX;
-      const hipY = (p.y - currentLegHeight - legWidth / 2) - camY;
+      const hipY = (posY - currentLegHeight - legWidth / 2) - camY;
 
       const headX = hipX;
       const headY = hipY - headRadius - headGap;
 
       const dir = p.facing || 1;
-      const groundContactY = (p.y - legWidth / 2) - camY;
+      const groundContactY = (posY - legWidth / 2) - camY;
 
       const jumpKneeAngleRad = (170 * Math.PI) / 180;
       const jumpLegHeight = 2 * thighLen * Math.sin(jumpKneeAngleRad / 2);
@@ -1528,7 +1541,7 @@
       });
 
       if (player.isAlive) {
-        drawPlayer(player, camX, camY);
+        drawPlayer(player, camX, camY, player.renderX, player.renderY);
       }
     }
 
@@ -1536,14 +1549,14 @@
       ctx.save();
       ctx.scale(CAMERA_ZOOM, CAMERA_ZOOM);
 
-      renderWorldObjects(cameraX, cameraY);
+      renderWorldObjects(renderCameraX, renderCameraY);
 
       ctx.restore();
 
       remotePlayers.forEach((rp) => {
         // While playing, a cursor marks peers that are editing or already dead.
         sampleRemote(rp);
-        if (rp.isEditor || !rp.isAlive) drawRemoteCursor(rp, cameraX, cameraY);
+        if (rp.isEditor || !rp.isAlive) drawRemoteCursor(rp, renderCameraX, renderCameraY);
       });
 
       ctx.fillStyle = PALETTE.player;
@@ -1590,8 +1603,8 @@
         return screenToWorldEditor(lastMouseX, lastMouseY);
       } else {
         return {
-          x: lastMouseX / CAMERA_ZOOM + cameraX,
-          y: lastMouseY / CAMERA_ZOOM + cameraY
+          x: lastMouseX / CAMERA_ZOOM + renderCameraX,
+          y: lastMouseY / CAMERA_ZOOM + renderCameraY
         };
       }
     }
@@ -1747,9 +1760,21 @@
       accumulator += frameTime;
 
       while (accumulator >= FIXED_TIMESTEP) {
+        // Snapshot before stepping so the leftover accumulator can be used to
+        // draw the frame somewhere between the last two simulated states.
+        player.prevX = player.x;
+        player.prevY = player.y;
+        prevCameraX = cameraX;
+        prevCameraY = cameraY;
         update();
         accumulator -= FIXED_TIMESTEP;
       }
+
+      const alpha = accumulator / FIXED_TIMESTEP;
+      player.renderX = player.prevX + (player.x - player.prevX) * alpha;
+      player.renderY = player.prevY + (player.y - player.prevY) * alpha;
+      renderCameraX = prevCameraX + (cameraX - prevCameraX) * alpha;
+      renderCameraY = prevCameraY + (cameraY - prevCameraY) * alpha;
 
       render();
       requestAnimationFrame(gameLoop);
@@ -1776,6 +1801,14 @@
       maxNodeIdx = -Infinity;
       cameraX = player.x - (width / CAMERA_ZOOM) * 0.5;
       cameraY = player.y - (height / CAMERA_ZOOM) * 0.5;
+      prevCameraX = cameraX;
+      prevCameraY = cameraY;
+      renderCameraX = cameraX;
+      renderCameraY = cameraY;
+      player.prevX = player.x;
+      player.prevY = player.y;
+      player.renderX = player.x;
+      player.renderY = player.y;
       distanceMetres = 0;
 
       updateGrassSystem(cameraX);
