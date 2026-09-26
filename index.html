@@ -1814,6 +1814,7 @@
     let dragOffset = { x: 0, y: 0 };
     let panStart = { x: 0, y: 0 };
     let resizeInitial = { x: 0, y: 0, w: 0, h: 0, rotation: 0 };
+    let resizeGrab = null;
     let clipboard = null;
     let isSelecting = false;
     let selectionStart = { x: 0, y: 0 };
@@ -2100,6 +2101,110 @@
       };
     }
 
+    // Smallest edge a resize may leave behind. One grid cell, so a rect never
+    // collapses to a hairline.
+    const MIN_RECT_SIZE = GRID_SIZE;
+
+    // Freezes the geometry a resize measures against and remembers where inside
+    // the corner the drag actually started. The handle has a hit radius, so the
+    // pointer is rarely dead on the corner; without this the rect teleports by up
+    // to a handle radius on the very first move, which reads as a flicker.
+    function beginResize(rect, corner, clientX, clientY) {
+      saveEditorState();
+      resizeHandle = corner;
+      resizeInitial = { x: rect.x, y: rect.y, w: rect.w, h: rect.h, rotation: getRectRotation(rect) };
+      const base = getResizeBaseRect();
+      const world = screenToWorldEditor(clientX, clientY);
+      const local = worldToRect(base, world.x, world.y);
+      // Measured from the corner itself, not stored as the corner's own local
+      // position, so the dragged edge stays pinned under the pointer.
+      resizeGrab = {
+        x: local.x - (corner.includes('l') ? 0 : base.w),
+        y: local.y - (corner.includes('t') ? 0 : base.h)
+      };
+      selectedRect = rect;
+    }
+
+    // Applies one pointer position to a live resize drag. All of the measuring
+    // happens in the rect's own local space (0,0 to w,h), the same frame
+    // worldToRect hands back: mixing that local offset in with world positions is
+    // what used to fling rects to the origin and grow them to fill the world.
+    function applyResizeDrag(worldX, worldY, snap) {
+      const rect = selectedRect;
+      if (!rect || !resizeHandle) return;
+
+      const base = getResizeBaseRect();
+      const cursor = worldToRect(base, worldX, worldY);
+      const grabX = resizeGrab ? resizeGrab.x : 0;
+      const grabY = resizeGrab ? resizeGrab.y : 0;
+
+      let left = 0;
+      let right = base.w;
+      let top = 0;
+      let bottom = base.h;
+
+      if (resizeHandle.includes('l')) left = cursor.x - grabX;
+      if (resizeHandle.includes('r')) right = cursor.x - grabX;
+      if (resizeHandle.includes('t')) top = cursor.y - grabY;
+      if (resizeHandle.includes('b')) bottom = cursor.y - grabY;
+
+      // Snap the dragged edges along the rect's own axes, so they land on grid
+      // lines rather than being rounded twice and drifting off them.
+      const rightAxis = getRectRight(base);
+      const downAxis = { x: -rightAxis.y, y: rightAxis.x };
+      const origin = rectToWorld(base, 0, 0);
+      const originOnX = origin.x * rightAxis.x + origin.y * rightAxis.y;
+      const originOnY = origin.x * downAxis.x + origin.y * downAxis.y;
+      const snapOnAxis = (value, originOnAxis) =>
+        Math.round((originOnAxis + value) / GRID_SIZE) * GRID_SIZE - originOnAxis;
+
+      if (snap) {
+        if (resizeHandle.includes('l')) left = snapOnAxis(left, originOnX);
+        if (resizeHandle.includes('r')) right = snapOnAxis(right, originOnX);
+        if (resizeHandle.includes('t')) top = snapOnAxis(top, originOnY);
+        if (resizeHandle.includes('b')) bottom = snapOnAxis(bottom, originOnY);
+      }
+
+      // Clamp rather than discarding the update: dragging an edge past its
+      // opposite side used to leave the rect frozen at its old size, so the drag
+      // felt like it had stopped responding.
+      if (right - left < MIN_RECT_SIZE) {
+        if (resizeHandle.includes('l')) left = right - MIN_RECT_SIZE;
+        else right = left + MIN_RECT_SIZE;
+      }
+      if (bottom - top < MIN_RECT_SIZE) {
+        if (resizeHandle.includes('t')) top = bottom - MIN_RECT_SIZE;
+        else bottom = top + MIN_RECT_SIZE;
+      }
+
+      const w = Math.round(right - left);
+      const h = Math.round(bottom - top);
+
+      // Where the new rect's local (0,0) corner has to sit for the dragged edge to
+      // land on the cursor and the opposite edge to stay put: the base origin slid
+      // by the local inset of the new top-left. The frame's axes and rotation are
+      // untouched, so a rotated rect resizes along its own edges.
+      const movedX = origin.x + left * rightAxis.x + top * downAxis.x;
+      const movedY = origin.y + left * rightAxis.y + top * downAxis.y;
+
+      // rect.x/rect.y are the centre-frame origin, which coincides with the
+      // world position of the local (0,0) corner only while the rect is
+      // unrotated, so solve for the centre and back out from there. Assigning
+      // rect.x directly from the local inset instead would only be right for an
+      // unrotated rect, and would drag a rotated one's corner off the cursor.
+      const cos = Math.cos(base.rotation);
+      const sin = Math.sin(base.rotation);
+      const x = Math.round(movedX + (w / 2) * cos - (h / 2) * sin - w / 2);
+      const y = Math.round(movedY + (w / 2) * sin + (h / 2) * cos - h / 2);
+
+      if (rect.x === x && rect.y === y && rect.w === w && rect.h === h) return;
+      rect.x = x;
+      rect.y = y;
+      rect.w = w;
+      rect.h = h;
+      sendLevelSync();
+    }
+
     // Sets the canvas transform so the rect can be drawn in its own local
     // space (0,0 to w,h), with camera offset applied.
     function setRectCanvasTransform(rect, camX = 0, camY = 0) {
@@ -2289,10 +2394,7 @@
         for (const rect of selectedRects) {
           const corner = getCornerHandle(e, rect);
           if (corner) {
-            saveEditorState();
-            resizeHandle = corner;
-            resizeInitial = { x: rect.x, y: rect.y, w: rect.w, h: rect.h, rotation: getRectRotation(rect) };
-            selectedRect = rect;
+            beginResize(rect, corner, e.clientX, e.clientY);
             return;
           }
         }
@@ -2396,34 +2498,7 @@
       if (resizeHandle && selectedRect) {
         // Corners are dragged in the rect's own space, so resizing a rotated
         // rect keeps its rotation.
-        const cursor = worldToRect(getResizeBaseRect(), mouseWorld.x, mouseWorld.y);
-
-        let left = resizeInitial.x;
-        let right = resizeInitial.x + resizeInitial.w;
-        let top = resizeInitial.y;
-        let bottom = resizeInitial.y + resizeInitial.h;
-
-        if (resizeHandle.includes('l')) left = cursor.x;
-        if (resizeHandle.includes('r')) right = cursor.x;
-        if (resizeHandle.includes('t')) top = cursor.y;
-        if (resizeHandle.includes('b')) bottom = cursor.y;
-
-        if (e.shiftKey) {
-          if (resizeHandle.includes('l')) left = Math.round(left / GRID_SIZE) * GRID_SIZE;
-          if (resizeHandle.includes('r')) right = Math.round(right / GRID_SIZE) * GRID_SIZE;
-          if (resizeHandle.includes('t')) top = Math.round(top / GRID_SIZE) * GRID_SIZE;
-          if (resizeHandle.includes('b')) bottom = Math.round(bottom / GRID_SIZE) * GRID_SIZE;
-        }
-
-        if (right - left >= GRID_SIZE) {
-          selectedRect.x = left;
-          selectedRect.w = right - left;
-        }
-        if (bottom - top >= GRID_SIZE) {
-          selectedRect.y = top;
-          selectedRect.h = bottom - top;
-        }
-        sendLevelSync();
+        applyResizeDrag(mouseWorld.x, mouseWorld.y, e.shiftKey);
       } else if (isDragging && selectedRects.length > 0) {
         let newX = mouseWorld.x - dragOffset.x;
         let newY = mouseWorld.y - dragOffset.y;
@@ -2478,6 +2553,7 @@
       isRotating = false;
       rotationStartRect = null;
       resizeHandle = null;
+      resizeGrab = null;
       isPanning = false;
     });
 
@@ -2625,10 +2701,7 @@
           for (const rect of selectedRects) {
             const corner = getCornerHandle(touchPoint, rect);
             if (corner) {
-              saveEditorState();
-              resizeHandle = corner;
-              resizeInitial = { x: rect.x, y: rect.y, w: rect.w, h: rect.h, rotation: getRectRotation(rect) };
-              selectedRect = rect;
+              beginResize(rect, corner, touch.clientX, touch.clientY);
               return;
             }
           }
@@ -2726,32 +2799,7 @@
             sendLevelSync();
           }
         } else if (resizeHandle && selectedRect) {
-          const cursor = worldToRect(getResizeBaseRect(), mouseWorld.x, mouseWorld.y);
-
-          let left = resizeInitial.x;
-          let right = resizeInitial.x + resizeInitial.w;
-          let top = resizeInitial.y;
-          let bottom = resizeInitial.y + resizeInitial.h;
-
-          if (resizeHandle.includes('l')) left = cursor.x;
-          if (resizeHandle.includes('r')) right = cursor.x;
-          if (resizeHandle.includes('t')) top = cursor.y;
-          if (resizeHandle.includes('b')) bottom = cursor.y;
-
-          left = Math.round(left / GRID_SIZE) * GRID_SIZE;
-          right = Math.round(right / GRID_SIZE) * GRID_SIZE;
-          top = Math.round(top / GRID_SIZE) * GRID_SIZE;
-          bottom = Math.round(bottom / GRID_SIZE) * GRID_SIZE;
-
-          if (right - left >= GRID_SIZE) {
-            selectedRect.x = left;
-            selectedRect.w = right - left;
-          }
-          if (bottom - top >= GRID_SIZE) {
-            selectedRect.y = top;
-            selectedRect.h = bottom - top;
-          }
-          sendLevelSync();
+          applyResizeDrag(mouseWorld.x, mouseWorld.y, true);
         } else if (isDragging && selectedRects.length > 0) {
           let newX = mouseWorld.x - dragOffset.x;
           let newY = mouseWorld.y - dragOffset.y;
@@ -2789,6 +2837,7 @@
       isRotating = false;
       rotationStartRect = null;
       resizeHandle = null;
+      resizeGrab = null;
       isPanning = false;
     });
 
