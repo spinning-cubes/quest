@@ -252,6 +252,8 @@
     ];
     const STATE_SEND_INTERVAL = 33; // ms between player state snapshots (~30Hz)
     const LEVEL_SYNC_INTERVAL = 50; // ms between level snapshots while dragging
+    const REMOTE_INTERP_DELAY = 100; // ms remote players are drawn behind by
+    const REMOTE_BUFFER_LIMIT = 24; // ~0.8s of snapshots at the send rate
 
     let peer = null;
     let pendingPeer = null; // instance still negotiating its room code
@@ -439,26 +441,96 @@
           facing: data.facing, animPhase: data.animPhase,
           isGrounded: data.isGrounded, crouchFactor: data.crouchFactor,
           rotation: data.rotation || 0,
-          isAlive: data.isAlive !== false,
-          isEditor: !!data.isEditor,
-          cursorX: data.cursorX, cursorY: data.cursorY,
-          dist: data.dist || 0,
+          isAlive: true, isEditor: false,
+          cursorX: data.cursorX, cursorY: data.cursorY, dist: 0,
           slot: colorIndex(data.slot),
+          color: getPlayerColor(data.slot),
+          snap: [],
           leg1: { x: data.x, y: data.y },
           leg2: { x: data.x, y: data.y }
         };
         remotePlayers.set(playerId, rp);
-      } else {
-        Object.assign(rp, data);
       }
 
       // Colour follows the slot the host handed out, not the wire payload.
       rp.slot = colorIndex(data.slot !== undefined ? data.slot : rp.slot);
       rp.color = getPlayerColor(rp.slot);
 
+      // Positions are buffered and interpolated at render time instead of
+      // snapping to whatever arrived last, which is what made remote players
+      // stutter at the snapshot rate.
+      rp.snap.push({
+        t: performance.now(),
+        x: data.x, y: data.y, vx: data.vx, vy: data.vy,
+        facing: data.facing, animPhase: data.animPhase,
+        isGrounded: data.isGrounded, crouchFactor: data.crouchFactor,
+        rotation: data.rotation || 0,
+        isAlive: data.isAlive !== false, isEditor: !!data.isEditor,
+        cursorX: data.cursorX, cursorY: data.cursorY, dist: data.dist || 0
+      });
+      if (rp.snap.length > REMOTE_BUFFER_LIMIT) rp.snap.shift();
+
       if (data.type === 'death') {
         createExplosion(data.x, data.y, rp.color);
         playCrashSound();
+      }
+    }
+
+    // Interpolates along the shortest arc, so wrapping values like the walk
+    // cycle phase do not spin the long way round.
+    function lerpAngle(a, b, t) {
+      let delta = (b - a) % (Math.PI * 2);
+      if (delta > Math.PI) delta -= Math.PI * 2;
+      if (delta < -Math.PI) delta += Math.PI * 2;
+      return a + delta * t;
+    }
+
+    function applyRemoteSample(rp, a, b, t) {
+      rp.x = a.x + (b.x - a.x) * t;
+      rp.y = a.y + (b.y - a.y) * t;
+      rp.vx = a.vx + (b.vx - a.vx) * t;
+      rp.vy = a.vy + (b.vy - a.vy) * t;
+      rp.animPhase = lerpAngle(a.animPhase, b.animPhase, t);
+      rp.rotation = lerpAngle(a.rotation, b.rotation, t);
+      rp.crouchFactor = a.crouchFactor + (b.crouchFactor - a.crouchFactor) * t;
+      rp.isGrounded = t < 0.5 ? a.isGrounded : b.isGrounded;
+    }
+
+    // Moves a remote player to where it should be drawn: one interpolation
+    // delay behind the newest snapshot, so there is always a pair of snapshots
+    // to blend. Clamps to the buffer ends rather than extrapolating, which
+    // would overshoot when a peer's packets are late.
+    function sampleRemote(rp) {
+      const buf = rp.snap;
+      if (buf.length === 0) return;
+
+      const newest = buf[buf.length - 1];
+      // Discrete state should not sit back in the interpolation window.
+      rp.isAlive = newest.isAlive;
+      rp.isEditor = newest.isEditor;
+      rp.dist = newest.dist;
+      rp.cursorX = newest.cursorX;
+      rp.cursorY = newest.cursorY;
+      rp.facing = newest.facing;
+
+      const renderTime = performance.now() - REMOTE_INTERP_DELAY;
+
+      if (buf.length === 1 || renderTime <= buf[0].t) {
+        applyRemoteSample(rp, buf[0], buf[0], 0);
+        return;
+      }
+      if (renderTime >= newest.t) {
+        applyRemoteSample(rp, newest, newest, 0);
+        return;
+      }
+
+      for (let i = buf.length - 1; i > 0; i--) {
+        const b = buf[i];
+        const a = buf[i - 1];
+        if (renderTime < a.t || renderTime > b.t) continue;
+        const span = b.t - a.t;
+        applyRemoteSample(rp, a, b, span > 0 ? (renderTime - a.t) / span : 0);
+        return;
       }
     }
 
@@ -642,7 +714,7 @@
     }
 
     function syncLevelFromRemote(newRects) {
-      const selectedIndices = selectedRects.map(r => rectangles.indexOf(r)).filter(i => i !== -1);
+      let selectedIndices = selectedRects.map(r => rectangles.indexOf(r)).filter(i => i !== -1);
       rectangles = newRects;
       selectedIndices = selectedIndices.map(i => rectangles[i]).filter(i => i < rectangles.length && rectangles[i]);
       selectedRect = selectedRects.length > 0 ? selectedRects[0] : null;
@@ -667,9 +739,12 @@
       const dpr = window.devicePixelRatio || 1;
       width = window.innerWidth;
       height = window.innerHeight;
-      canvas.width = width * dpr;
-      canvas.height = height * dpr;
-      ctx.scale(dpr, dpr);
+      canvas.width = Math.round(width * dpr);
+      canvas.height = Math.round(height * dpr);
+      // setTransform, not scale: scale() multiplies whatever transform is
+      // already there, so every resize would compound the last one and the
+      // world would drift towards microscopic or gigantic.
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       groundY = Math.floor(((height / CAMERA_ZOOM) * 0.75) / GRID_SIZE) * GRID_SIZE;
     }
     window.addEventListener('resize', resize);
@@ -971,19 +1046,61 @@
       return { kneeX, kneeY, tipX, tipY };
     }
 
+    const PLAYER_HEAD_RADIUS = 15;
+    const PLAYER_LEG_WIDTH = 12;
+    const PLAYER_THIGH_LEN = 22;
+    const PLAYER_SHIN_LEN = 22;
+    const PLAYER_HEAD_GAP = 10;
+    const PLAYER_STANDING_LEG_HEIGHT =
+      2 * PLAYER_THIGH_LEN * Math.sin(((125 * Math.PI) / 180) / 2);
+    const PLAYER_CROUCH_LEG_HEIGHT = PLAYER_STANDING_LEG_HEIGHT * 0.5;
+    const TILT_PIVOT_TWEEN = 0.25;
+
+    function getPlayerLegHeight(crouchFactor) {
+      return PLAYER_STANDING_LEG_HEIGHT -
+        crouchFactor * (PLAYER_STANDING_LEG_HEIGHT - PLAYER_CROUCH_LEG_HEIGHT);
+    }
+
+    // Height of the pivot drawPlayer spins around, measured up from the feet.
+    // applyPlayerTilt turns the body about the same point so the feet stay
+    // planted on the surface instead of sliding around an arc.
+    function getPlayerPivotAboveFeet(crouchFactor) {
+      return getPlayerLegHeight(crouchFactor) + PLAYER_LEG_WIDTH / 2 +
+        PLAYER_HEAD_RADIUS + PLAYER_HEAD_GAP / 2;
+    }
+
+    // Leans the player onto the surface they are standing on. Applying the same
+    // increment to position and rotation is what makes the motion read as a
+    // body pivoting rather than the whole sprite being skewed.
+    function applyPlayerTilt(targetRotation) {
+      if (targetRotation === player.rotation) return;
+
+      const pivotX = player.x;
+      const pivotY = player.y - getPlayerPivotAboveFeet(player.crouchFactor);
+      const oldRotation = player.rotation;
+      player.rotation += (targetRotation - oldRotation) * TILT_PIVOT_TWEEN;
+
+      const delta = player.rotation - oldRotation;
+      if (delta === 0) return;
+
+      const cos = Math.cos(delta);
+      const sin = Math.sin(delta);
+      const dx = player.x - pivotX;
+      const dy = player.y - pivotY;
+      player.x = pivotX + dx * cos - dy * sin;
+      player.y = pivotY + dx * sin + dy * cos;
+    }
+
     function drawPlayer(p, camX, camY = 0) {
       const screenX = p.x - camX;
       
-      const headRadius = 15;
-      const legWidth = 12;
-      const thighLen = 22;
-      const shinLen = 22;
-      const headGap = 10;
+      const headRadius = PLAYER_HEAD_RADIUS;
+      const legWidth = PLAYER_LEG_WIDTH;
+      const thighLen = PLAYER_THIGH_LEN;
+      const shinLen = PLAYER_SHIN_LEN;
+      const headGap = PLAYER_HEAD_GAP;
 
-      const innerKneeAngleRad = (125 * Math.PI) / 180;
-      const standingLegHeight = 2 * thighLen * Math.sin(innerKneeAngleRad / 2);
-      const crouchLegHeight = standingLegHeight * 0.5;
-      const currentLegHeight = standingLegHeight - p.crouchFactor * (standingLegHeight - crouchLegHeight);
+      const currentLegHeight = getPlayerLegHeight(p.crouchFactor);
       
       const hipX = screenX;
       const hipY = (p.y - currentLegHeight - legWidth / 2) - camY;
@@ -1129,11 +1246,13 @@
     }
 
     function drawRemotePlayer(rp, camX, camY = 0) {
+      sampleRemote(rp);
       if (!rp.isAlive || rp.isEditor || rp.cursorX === undefined) return;
       drawPlayer(rp, camX, camY);
     }
 
     function drawRemoteCursor(rp, camX, camY = 0) {
+      sampleRemote(rp);
       if (rp.cursorX === undefined) return;
       const sx = (rp.cursorX - camX) * CAMERA_ZOOM;
       const sy = (rp.cursorY - camY) * CAMERA_ZOOM;
@@ -1238,6 +1357,8 @@
       player.y += player.vy;
       box = getPlayerBox(player.x, player.y, totalHeight);
       let groundedThisFrame = false;
+      let standRotation = 0; // surface tilt to lean into, 0 while airborne
+      let landedRect = null;
 
       for (let rect of rectangles) {
         if (rect.type === 'obstacle') {
@@ -1261,6 +1382,7 @@
             player.y = getRectSurfaceY(rect, player.x);
             player.vy = 0;
             groundedThisFrame = true;
+            standRotation = getRectRotation(rect);
           } else if (player.vy < 0) {
             const topLocal = worldToRect(rect, player.x, box.top);
             const topPrevLocal = worldToRect(rect, player.x, box.top - player.vy);
@@ -1274,11 +1396,13 @@
         }
       }
 
-      if (resolvePlayerPenetration(totalHeight)) {
+      if (resolvePlayerPenetration(totalHeight, landedRect)) {
         groundedThisFrame = true;
+        if (landedRect) standRotation = getRectRotation(landedRect);
       }
 
       player.isGrounded = groundedThisFrame;
+      applyPlayerTilt(standRotation);
 
       if (player.isGrounded && Math.abs(player.vx) > 0.1) {
         player.animPhase += Math.abs(player.vx) * 0.08;
@@ -1415,6 +1539,7 @@
 
       remotePlayers.forEach((rp) => {
         // While playing, a cursor marks peers that are editing or already dead.
+        sampleRemote(rp);
         if (rp.isEditor || !rp.isAlive) drawRemoteCursor(rp, cameraX, cameraY);
       });
 
@@ -1577,6 +1702,7 @@
       ctx.restore();
 
       remotePlayers.forEach((rp) => {
+        sampleRemote(rp);
         const sp = worldToScreenEditor(rp.cursorX, rp.cursorY);
         drawCursorAtScreenPos(sp.x, sp.y, rp.isEditor, rp.color, `Player ${rp.slot + 1}`);
       });
@@ -1989,7 +2115,9 @@
     // underside has no landing case, so they would otherwise walk through it).
     // Resolves along the shallowest axis, like a rigid body solver would, and
     // drops the feet onto the surface when pushed out of a top face.
-    function resolvePlayerPenetration(totalHeight) {
+    // Pass the rect you land on via `landedRect` so the caller can align the
+    // player to that surface; it stays null when nothing was landed on.
+    function resolvePlayerPenetration(totalHeight, landedRect) {
       let landed = false;
 
       for (let pass = 0; pass < 4; pass++) {
@@ -2022,6 +2150,9 @@
           if (isTopFace) {
             player.y = getRectSurfaceY(rect, player.x);
             player.vy = 0;
+            if (!landed || getRectRotation(rect) !== getRectRotation(landedRect)) {
+              landedRect = rect;
+            }
             landed = true;
           }
 
