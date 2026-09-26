@@ -1,0 +1,294 @@
+[
+  {
+    "x": -360,
+    "y": 552,
+    "w": 528,
+    "h": 384,
+    "type": "grass",
+    "id": "oba8pa-1"
+  },
+  {
+    "x": 1104,
+    "y": 264,
+    "w": 144,
+    "h": 192,
+    "type": "grass",
+    "id": "oba8pa-4"
+  },
+  {
+    "x": 960,
+    "y": 336,
+    "w": 144,
+    "h": 120,
+    "type": "grass",
+    "id": "oba8pa-6"
+  },
+  {
+    "x": 1248,
+    "y": 192,
+    "w": 144,
+    "h": 264,
+    "type": "grass",
+    "id": "oba8pa-7"
+  },
+  {
+    "x": 1392,
+    "y": 120,
+    "w": 144,
+    "h": 336,
+    "type": "grass",
+    "id": "oba8pa-8"
+  },
+  {
+    "id": "oba8pa-9",
+    "x": 91,
+    "y": 478,
+    "w": 306,
+    "h": 51,
+    "rotation": -0.5235987755982988,
+    "type": "platform"
+  },
+  {
+    "id": "rca6w1-9",
+    "x": 459,
+    "y": 335,
+    "w": 192,
+    "h": 48,
+    "type": "platform",
+    "rotation": 0
+  },
+  {
+    "id": "oba8pa-a",
+    "x": 707,
+    "y": 452,
+    "w": 831,
+    "h": 390,
+    "rotation": 0,
+    "type": "grass"
+  },
+  {
+    "id": "rca6w1-a",
+    "x": 615,
+    "y": 289,
+    "w": 287,
+    "h": 35,
+    "type": "platform",
+    "rotation": -0.377
+  },
+  {
+    "id": "rca6w1-c",
+    "x": 615,
+    "y": 289,
+    "w": 287,
+    "h": 35,
+    "type": "platform",
+    "rotation": -0.377
+  },
+  {
+    "id": "rca6w1-d",
+    "x": 1575,
+    "y": 121,
+    "w": 192,
+    "h": 48,
+    "type": "platform",
+    "rotation": 0
+  },
+  {
+    "id": "rca6w1-e",
+    "x": 708,
+    "y": 340,
+    "w": 254,
+    "h": 231,
+    "type": "grass",
+    "rotation": 0
+  },
+  {
+    "id": "xm1h7h-9",
+    "x": 1912,
+    "y": 112,
+    "w": 192,
+    "h": 48,
+    "type": "platform",
+    "rotation": 0
+  },
+  {
+    "id": "xm1h7h-a",
+    "x": 2229,
+    "y": 97,
+    "w": 192,
+    "h": 48,
+    "type": "platform",
+    "rotation": 0
+  },
+  {
+    "id": "xm1h7h-c",
+    "x": 2550,
+    "y": 36,
+    "w": 192,
+    "h": 48,
+    "type": "platform",
+    "rotation": 0
+  },
+  {
+    "id": "xm1h7h-d",
+    "x": 2816,
+    "y": 40,
+    "w": 495,
+    "h": 49,
+    "type": "platform",
+    "rotation": 0
+  },
+  {
+    "id": "xm1h7h-e",
+    "x": 2908,
+    "y": -7,
+    "w": 54,
+    "h": 49,
+    "type": "obstacle",
+    "rotation": 0
+  },
+  {
+    "id": "xm1h7h-f",
+    "x": 3067,
+    "y": -7,
+    "w": 54,
+    "h": 49,
+    "type": "obstacle",
+    "rotation": 0
+  },
+  {
+    "id": "xm1h7h-g",
+    "x": 3211,
+    "y": -10,
+    "w": 54,
+    "h": 49,
+    "type": "obstacle",
+    "rotation": 0
+  },
+  {
+    "id": "xm1h7h-h",
+    "x": 2816,
+    "y": -193,
+    "w": 495,
+    "h": 49,
+    "type": "platform",
+    "rotation": 0
+  },
+  {
+    "id": "xm1h7h-i",
+    "x": 3312,
+    "y": -192,
+    "w": 504,
+    "h": 48,
+    "type": "platform",
+    "rotation": 0
+  },
+  {
+    "id": "xm1h7h-j",
+    "x": 3311,
+    "y": 41,
+    "w": 600,
+    "h": 49,
+    "type": "platform",
+    "rotation": 0
+  },
+  {
+    "id": "xm1h7h-k",
+    "x": 3351,
+    "y": -6,
+    "w": 54,
+    "h": 49,
+    "type": "obstacle",
+    "rotation": 0
+  },
+  {
+    "id": "xm1h7h-l",
+    "x": 3480,
+    "y": -161,
+    "w": 54,
+    "h": 49,
+    "type": "obstacle",
+    "rotation": 0
+  },
+  {
+    "id": "xm1h7h-m",
+    "x": 3623,
+    "y": -3,
+    "w": 54,
+    "h": 49,
+    "type": "obstacle",
+    "rotation": 0
+  },
+  {
+    "id": "xm1h7h-n",
+    "x": 3753,
+    "y": -163,
+    "w": 54,
+    "h": 49,
+    "type": "obstacle",
+    "rotation": 0
+  },
+  {
+    "id": "xm1h7h-p",
+    "x": 4048,
+    "y": -11,
+    "w": 54,
+    "h": 49,
+    "type": "obstacle",
+    "rotation": 0
+  },
+  {
+    "id": "xm1h7h-q",
+    "x": 3960,
+    "y": 24,
+    "w": 193,
+    "h": 24,
+    "type": "platform",
+    "rotation": 0
+  },
+  {
+    "id": "xm1h7h-r",
+    "x": 4152,
+    "y": 24,
+    "w": 193,
+    "h": 24,
+    "type": "platform",
+    "rotation": 0
+  },
+  {
+    "id": "xm1h7h-s",
+    "x": 4416,
+    "y": -24,
+    "w": 193,
+    "h": 24,
+    "type": "platform",
+    "rotation": 0
+  },
+  {
+    "id": "xm1h7h-t",
+    "x": 4680,
+    "y": -48,
+    "w": 125,
+    "h": 27,
+    "type": "platform",
+    "rotation": 0
+  },
+  {
+    "id": "xm1h7h-u",
+    "x": 4872,
+    "y": 24,
+    "w": 125,
+    "h": 27,
+    "type": "platform",
+    "rotation": 0
+  },
+  {
+    "id": "xm1h7h-v",
+    "x": 5048,
+    "y": -34,
+    "w": 125,
+    "h": 27,
+    "type": "platform",
+    "rotation": 0
+  }
+]

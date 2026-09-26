@@ -32,7 +32,7 @@
       top: 6px;
       left: 6px;
       z-index: 10;
-      display: flex;
+      display: none; /* hidden until menu choice is made */
       flex-wrap: wrap;
       gap: 4px;
       background: none;
@@ -68,9 +68,183 @@
     #fileInput {
       display: none;
     }
+
+    /* --- Main menu --- */
+    #mainMenu {
+      position: fixed;
+      inset: 0;
+      z-index: 50;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 22px;
+      background: #6487d9;
+      color: #fff;
+      text-align: center;
+    }
+    #mainMenu.hidden { display: none; }
+    #mainMenu h1 {
+      font-size: 100px;
+      margin-bottom: 60px;
+    }
+    #mainMenu .menu-panel {
+      background: rgba(68, 58, 58, 0.4);
+      padding: 20px 28px;
+      border-radius: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      min-width: 280px;
+      align-items: stretch;
+    }
+    #mainMenu .menu-label {
+      font-size: 12px;
+      opacity: 0.85;
+      margin-bottom: 4px;
+      letter-spacing: 1px;
+    }
+    #mainMenu .menu-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    #mainMenu input[type="text"] {
+      font-size: 14px;
+      text-align: center;
+      font-size: 34px;
+      width: 220px;
+      height: 60px;
+      border-radius: 999px;
+      background: transparent;
+    }
+    #mainMenu button.menu-btn {
+      font-size: 34px;
+      padding: 10px 18px;
+      border-radius: 999px;
+      width: 380px;
+      background: rgba(0, 0, 0, 0.6);
+    }
+    #mainMenu button.menu-btn:hover { background: rgba(57, 173, 88, 1); color: #fff; }
+    #mainMenu .menu-status {
+      min-height: 18px;
+      font-size: 13px;
+      opacity: 0.8;
+    }
+    #mainMenu .menu-divider {
+      height: 1px;
+      background: rgba(255, 255, 255, 0.15);
+      margin: 4px 0;
+    }
+    #mainMenu .menu-hint {
+      font-size: 11px;
+      opacity: 0.6;
+      margin-top: 6px;
+      max-width: 280px;
+      line-height: 1.4;
+    }
+
+    /* Merged Join Input Container */
+    .join-container {
+      display: flex;
+      align-items: center;
+      background: rgba(0, 0, 0, 0.6);
+      border-radius: 999px;
+      width: 380px;
+      height: 60px;
+    }
+    .join-container input[type="text"] {
+      flex: 1;
+      height: 100%;
+      background: transparent;
+      border: none;
+      border-radius: 999px 0 0 999px;
+      width: 160px !important;
+      padding-right: 0px !important;
+      transform: translateX(10px);
+      font-size: 28px;
+      text-align: center;
+      color: #fff;
+      padding: 0 10px;
+    }
+    .join-container button.menu-btn {
+      height: 100%;
+      width: auto;
+      padding: 0 24px;
+      font-size: 24px;
+      background: transparent !important;
+      border-radius: 999px;
+      white-space: nowrap;
+    }
+    .join-container button.menu-btn:hover {
+      background: rgba(57, 173, 88, 1) !important;
+      color: #fff;
+    }
+
+    #shapeProps {
+      position: absolute;
+      z-index: 12;
+      display: none;
+      flex-direction: column;
+      gap: 3px;
+      padding: 5px 7px;
+      background: rgba(0, 0, 0, 0.4);
+      color: #fff;
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    #shapeProps .spHead {
+      font-weight: 600;
+      opacity: 0.7;
+    }
+    #shapeProps .spRow {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      padding: 1px 0;
+      background: none;
+      cursor: default;
+    }
+    #shapeProps input[type="checkbox"] {
+      width: 12px;
+      height: 12px;
+      margin: 0;
+      accent-color: #39ad58;
+      cursor: pointer;
+    }
+    #shapeProps input[type="number"] {
+      font-size: 11px;
+      padding: 1px 3px;
+      border: none;
+      border-radius: 0;
+      background: rgba(255, 255, 255, 0.16);
+      color: #fff;
+      outline: none;
+      width: 44px;
+      cursor: text;
+      user-select: text;
+      -webkit-user-select: text;
+    }
+    #shapeProps .spDim {
+      opacity: 0.35;
+    }
   </style>
 </head>
 <body>
+
+  <!-- Main Menu -->
+  <div id="mainMenu">
+    <h1>Quest</h1>
+
+    <button class="menu-btn" id="menuHostBtn">Host World</button>
+    
+    <div class="join-container">
+      <input type="text" id="menuPeerIdInput" placeholder="ID" maxlength="6">
+      <button class="menu-btn" id="menuJoinBtn">Join World</button>
+    </div>
+    
+    <div class="menu-status" id="menuStatus" style="display: none;"></div>
+  </div>
 
   <div id="ui">
     <button id="modeBtn" tabindex="-1">Switch to Editor Mode</button>
@@ -97,6 +271,21 @@
       <input type="text" id="peerIdInput" placeholder="Enter Host ID..." tabindex="-1">
       <button id="joinBtn" tabindex="-1">Join</button>
     </div>
+  </div>
+
+  <div id="shapeProps">
+    <span class="spHead">Shape Properties</span>
+    <label class="spRow"><input type="checkbox" id="spDeadly"> Deadly</label>
+    <label class="spRow"><input type="checkbox" id="spSpin"> Spins</label>
+    <label class="spRow spSpinOpt">Speed
+      <input type="number" id="spSpinSpeed" min="1" max="720" step="5" value="45"> &deg;/s
+    </label>
+    <label class="spRow spSpinOpt">Direction
+      <select id="spSpinDir">
+        <option value="1">Clockwise</option>
+        <option value="-1">Counter-clockwise</option>
+      </select>
+    </label>
   </div>
 
   <canvas id="gameCanvas"></canvas>
@@ -180,7 +369,12 @@
         w: rect.w,
         h: rect.h,
         type: rect.type,
-        rotation: getRectRotation(rect)
+        // The base angle, never getRectRotation(): sending the live spun angle
+        // would make every spinning shape look edited on all 20 syncs a second,
+        // and peers would add their own phase on top of it.
+        rotation: rect.rotation || 0,
+        spin: rect.spin || 0,
+        deadly: isDeadly(rect)
       };
     }
 
@@ -191,6 +385,8 @@
       rect.h = payload.h;
       rect.type = payload.type;
       rect.rotation = payload.rotation || 0;
+      rect.spin = payload.spin || 0;
+      rect.deadly = payload.deadly === undefined ? payload.type === 'obstacle' : !!payload.deadly;
       return rect;
     }
 
@@ -380,14 +576,15 @@
           return;
         }
         if (err.type === 'peer-unavailable') {
-          alert('No room with that ID');
+          setMenuStatus('No world with that ID');
+          showMainMenu();
           return;
         }
         if (err.type === 'network') {
-          alert('Network error, check your connection');
+          setMenuStatus('Network error, check your connection');
           return;
         }
-        alert(`Network error: ${err.type || err.message}`);
+        setMenuStatus(`Network error: ${err.type || err.message}`);
       });
 
       return p;
@@ -406,6 +603,9 @@
       applyRoster([{ id: localPeerId, slot: 0 }]);
       peerIdInput.value = localPeerId;
       if (navigator.clipboard) navigator.clipboard.writeText(localPeerId).catch(() => {});
+
+      // If we got here from the main menu, finalize entering the game.
+      if (!gameEntered) enterGame();
     }
 
     // Host side: claim a colour slot for an incoming peer, or turn it away
@@ -448,6 +648,7 @@
       const conn = peer.connect(hostId, { reliable: true });
       connections.set(hostId, { conn, slot: 0, stale: false });
       attachConnectionHandlers(conn, hostId, 0);
+      setMenuStatus('Connecting...');
     }
 
     function attachConnectionHandlers(conn, id) {
@@ -461,7 +662,8 @@
 
       if (data.type === 'roomFull') {
         resetNetState();
-        alert(`Room is full (${data.max || MAX_PLAYERS} players)`);
+        setMenuStatus(`World is full (${data.max || MAX_PLAYERS} players)`);
+        showMainMenu();
         return;
       }
 
@@ -474,6 +676,7 @@
           applyRoster(data.players);
           if (data.rectangles) adoptRemoteLevel(data.rectangles);
           sendPlayerState(true);
+          if (!gameEntered) enterGame();
           break;
         case 'roster':
           applyRoster(data.players);
@@ -615,7 +818,8 @@
         broadcastRoster();
       } else {
         resetNetState();
-        alert('Disconnected from host');
+        setMenuStatus('Disconnected from host');
+        showMainMenu();
       }
     }
 
@@ -735,6 +939,68 @@
       peerIdInput.value = peerIdInput.value.replace(/\D/g, '');
     });
 
+    // --- Main menu wiring ---
+    const mainMenu = document.getElementById('mainMenu');
+    const menuHostBtn = document.getElementById('menuHostBtn');
+    const menuJoinBtn = document.getElementById('menuJoinBtn');
+    const menuPeerIdInput = document.getElementById('menuPeerIdInput');
+
+    // Tracks whether we have crossed from the menu into the game proper. Stops
+    // the welcome handler and the host's open handler from re-running enterGame
+    // on reconnects, which would otherwise re-trigger a fresh restartGame.
+    let gameEntered = false;
+
+    function showMainMenu() {
+      mainMenu.classList.remove('hidden');
+      document.getElementById('ui').style.display = 'none';
+      menuPeerIdInput.value = '';
+      gameEntered = false;
+    }
+
+    function enterGame() {
+      gameEntered = true;
+      mainMenu.classList.add('hidden');
+      document.getElementById('ui').style.display = 'flex';
+      restartGame();
+    }
+
+    menuHostBtn.addEventListener('click', () => {
+      initAudio();
+      resetNetState();
+      netRole = 'host';
+      pendingJoinId = null;
+      if (peer && !peer.destroyed && peer.open) {
+        becomeHost();
+      } else {
+        ensurePeer();
+      }
+    });
+
+    function menuJoin() {
+      initAudio();
+      const hostId = menuPeerIdInput.value.trim();
+      if (!hostId) {
+        menuPeerIdInput.focus();
+        return;
+      }
+      resetNetState();
+      netRole = 'guest';
+      if (peer && !peer.destroyed && peer.open) {
+        connectToHost(hostId);
+      } else {
+        pendingJoinId = hostId;
+        ensurePeer();
+      }
+    }
+
+    menuJoinBtn.addEventListener('click', menuJoin);
+    menuPeerIdInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') menuJoin();
+    });
+    menuPeerIdInput.addEventListener('input', () => {
+      menuPeerIdInput.value = menuPeerIdInput.value.replace(/\D/g, '');
+    });
+
     let lastStateSend = -Infinity;
     function sendPlayerState(force) {
       if (connections.size === 0) return;
@@ -774,7 +1040,8 @@
 
     function isSameRectPayload(a, b) {
       return a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h &&
-             a.type === b.type && (a.rotation || 0) === (b.rotation || 0);
+             a.type === b.type && (a.rotation || 0) === (b.rotation || 0) &&
+             (a.spin || 0) === (b.spin || 0) && !!a.deadly === !!b.deadly;
     }
 
     function resetLevelSyncBaseline() {
@@ -852,6 +1119,7 @@
             const removed = rectangles[idx];
             selectedRects = selectedRects.filter(r => r !== removed);
             if (selectedRect === removed) selectedRect = null;
+            if (shapePropsRect === removed) shapePropsRect = null;
             if (rotationStartRect === removed) rotationStartRect = null;
             if (playerGroundRect === removed) playerGroundRect = null;
             rectangles.splice(idx, 1);
@@ -893,6 +1161,7 @@
 
       selectedRects = selectedRects.map(r => byId.get(r.id)).filter(Boolean);
       if (rotationStartRect) rotationStartRect = byId.get(rotationStartRect.id) || null;
+      if (shapePropsRect) shapePropsRect = byId.get(shapePropsRect.id) || null;
       selectedRect = selectedRects.length > 0 ? selectedRects[0] : null;
 
       resetLevelSyncBaseline();
@@ -902,6 +1171,12 @@
     // ids so the sync diff still lines up with what peers already hold.
     function adoptLocalLevel(list) {
       rectangles = ensureRectIds(Array.isArray(list) ? list : []);
+      // The whole array was just replaced, so anything held onto a rect from the
+      // old one is stale. Selection is dropped rather than remapped: undo, load
+      // and import have no meaningful counterpart for the old shapes.
+      selectedRects = [];
+      selectedRect = null;
+      shapePropsRect = null;
       resetLevelSyncBaseline();
       return rectangles;
     }
@@ -1463,6 +1738,11 @@
         if (pt.alpha <= 0) particles.splice(i, 1);
       }
 
+      // Runs in the editor too, so spinning shapes preview as you set them up.
+      // Held still during a rotation drag: the handle works off the live angle,
+      // and a moving phase under the cursor makes it impossible to place.
+      if (!isRotating) spinClock += FIXED_TIMESTEP / 1000;
+
       if (isEditor) {
         const activeCamX = editorCamX - (width / editorZoom) * 0.5;
         updateGrassSystem(activeCamX);
@@ -1516,7 +1796,7 @@
       let box = getPlayerBox(player.x, player.y, totalHeight);
 
       for (let rect of rectangles) {
-        if (rect.type === 'obstacle') {
+        if (isDeadly(rect)) {
           if (overlapsRectSpace(rect, box)) {
             player.isAlive = false;
             playCrashSound();
@@ -1526,7 +1806,7 @@
             sendPlayerState();
             return;
           }
-        } else if (rect.type === 'platform' || rect.type === 'grass') {
+        } else {
           const local = getBoxInRectSpace(rect, box);
           const halfW = rect.w / 2;
           const halfH = rect.h / 2;
@@ -1555,7 +1835,7 @@
       const wasGrounded = player.isGrounded;
 
       for (let rect of rectangles) {
-        if (rect.type === 'obstacle') {
+        if (isDeadly(rect)) {
           if (overlapsRectSpace(rect, box)) {
             player.isAlive = false;
             playCrashSound();
@@ -1565,7 +1845,7 @@
             sendPlayerState();
             return;
           }
-        } else if (rect.type === 'platform' || rect.type === 'grass') {
+        } else {
           // Past the climb limit this face is a wall, not a floor: no landing on
           // it and no standing on it. Penetration resolution still keeps it solid,
           // so the runner is pushed off it rather than dropping through.
@@ -1672,7 +1952,7 @@
     // Shadow is the platform silhouette extruded straight down, so a rotated
     // platform keeps its shadow underneath instead of under its bounding box.
     function drawPlatformShadow(r, camX, camY) {
-      const corners = getRectCorners(r);
+      /*const corners = getRectCorners(r);
       const hull = convexHullPoints(
         corners.concat(corners.map(c => ({ x: c.x, y: c.y + PLATFORM_SHADOW_DEPTH })))
       );
@@ -1683,10 +1963,47 @@
         ctx.lineTo(hull[i].x - camX, hull[i].y - camY);
       }
       ctx.closePath();
-      ctx.fill();
+      ctx.fill();*/
     }
 
-    function renderWorldObjects(camX, camY = 0) {
+    function rectToWorldUnspinned(rect, lx, ly) {
+      const rot = rect.rotation || 0;
+      if (rot === 0) return { x: rect.x + lx, y: rect.y + ly };
+      const cx = rect.x + rect.w / 2;
+      const cy = rect.y + rect.h / 2;
+      const dx = lx - rect.w / 2;
+      const dy = ly - rect.h / 2;
+      const cos = Math.cos(rot);
+      const sin = Math.sin(rot);
+      return { x: cx + dx * cos - dy * sin, y: cy + dx * sin + dy * cos };
+    }
+
+    function renderWorldObjects(camX, camY = 0, editorMode = false) {
+      if (editorMode) {
+        ctx.save();
+        ctx.globalAlpha = 0.35;
+        for (let r of rectangles) {
+          if (r.spin) {
+            ctx.save();
+            setRectCanvasTransformUnspinned(r, camX, camY);
+            if (r.type === 'grass') {
+              ctx.fillStyle = PALETTE.dirt;
+              ctx.fillRect(0, 0, r.w, r.h);
+              ctx.fillStyle = PALETTE.ground;
+              ctx.fillRect(0, 0, r.w, 24);
+            } else if (r.type === 'platform') {
+              ctx.fillStyle = PALETTE.platform;
+              ctx.fillRect(0, 0, r.w, r.h);
+            } else if (r.type === 'obstacle') {
+              ctx.fillStyle = PALETTE.block;
+              ctx.fillRect(0, 0, r.w, r.h);
+            }
+            ctx.restore();
+          }
+        }
+        ctx.restore();
+      }
+
       drawTerrain(camX, camY);
       drawGrass(camX, camY);
 
@@ -1727,20 +2044,8 @@
         }
       }
 
-      for (let pt of particles) {
-        ctx.save();
-        ctx.globalAlpha = Math.max(0, pt.alpha);
-        ctx.fillStyle = pt.color || PALETTE.player;
-        ctx.fillRect(pt.x - camX, pt.y - camY, pt.size, pt.size);
-        ctx.restore();
-      }
-
-      remotePlayers.forEach((rp) => {
-        drawRemotePlayer(rp, camX, camY);
-      });
-
-      if (player.isAlive) {
-        drawPlayer(player, camX, camY, player.renderX, player.renderY);
+      if (!editorMode) {
+        drawPlayer(player, camX, camY);
       }
     }
 
@@ -1932,6 +2237,8 @@
       } else {
         renderGame();
       }
+
+      updateShapeProps();
     }
 
     // Physics runs on a fixed step so the tuned constants (and the collision
@@ -1994,6 +2301,7 @@
       player.leg1 = { x: 0, y: groundY };
       player.leg2 = { x: 0, y: groundY };
       playerGroundRect = null;
+      spinClock = 0;
       particles = [];
       grassBladesMap.clear();
       grassRunsByRect.clear();
@@ -2044,8 +2352,10 @@
     const rectTypeSelect = document.getElementById('rectType');
 
     // Buttons and selects drop focus so the canvas keeps the keyboard, but the
-    // host id field has to stay focusable or it can never be typed into.
-    document.querySelectorAll('#ui button, #ui select').forEach(el => {
+    // host id field has to stay focusable or it can never be typed into. The spin
+    // speed field is left focusable for the same reason, and only gives it up
+    // once the value is committed.
+    document.querySelectorAll('#ui button, #ui select, #shapeProps select, #shapeProps input[type="checkbox"]').forEach(el => {
       el.addEventListener('focus', () => el.blur());
     });
 
@@ -2055,6 +2365,7 @@
         addBtn.classList.add('active');
         selectedRects = [];
         selectedRect = null;
+        shapePropsRect = null;
       } else {
         addBtn.classList.remove('active');
       }
@@ -2075,6 +2386,7 @@
         editorZoom = CAMERA_ZOOM;
         selectedRects = [];
         selectedRect = null;
+        shapePropsRect = null;
       } else {
         modeBtn.textContent = 'Switch to Editor Mode';
         modeBtn.classList.remove('active');
@@ -2145,6 +2457,7 @@
         adoptLocalLevel(getDefaultRectangles());
         selectedRects = [];
         selectedRect = null;
+        shapePropsRect = null;
         sendLevelSync();
       }
     });
@@ -2197,9 +2510,43 @@
     const ROTATION_SNAP = Math.PI / 12;
     const ROTATION_HANDLE_DISTANCE = 28;
     const ROTATION_HANDLE_HIT_RADIUS = 11;
+    const DEG2RAD = Math.PI / 180;
+    const MAX_SPIN_DEGREES = 720;
+
+    // Free running time for spinning shapes, in seconds. Frozen while a shape is
+    // being rotated by hand so the handle does not have to fight the animation.
+    let spinClock = 0;
+
+    // Whether a shape kills the player on touch. Independent of `type`, which
+    // only decides how the shape is drawn: shapes saved before this was
+    // configurable carry no flag, and for those "obstacle" meant deadly.
+    function isDeadly(rect) {
+      return rect.deadly === undefined ? rect.type === 'obstacle' : !!rect.deadly;
+    }
+
+    // Spin is deliberately kept out of rect.rotation. That field stays the
+    // authored base angle, so the rotation handle, the level sync and the saved
+    // JSON all keep working on a static number while the shape still animates.
+    function getSpinOffset(rect) {
+      return rect.spin ? rect.spin * spinClock : 0;
+    }
 
     function getRectRotation(rect) {
-      return rect.rotation || 0;
+      return isEditor ? (rect.rotation || 0) : ((rect.rotation || 0) + getSpinOffset(rect));
+    }
+
+    function setRectRotation(rect, angle) {
+      rect.rotation = Math.round((isEditor ? angle : (angle - getSpinOffset(rect))) * 1000) / 1000;
+    }
+
+    function getRotationHandleScreenPos(rect) {
+      const up = getRectUp(rect);
+      const anchor = rectToWorldUnspinned(rect, rect.w / 2, 0);
+      const sp = worldToScreenEditor(anchor.x, anchor.y);
+      return {
+        x: sp.x + up.x * ROTATION_HANDLE_DISTANCE,
+        y: sp.y + up.y * ROTATION_HANDLE_DISTANCE
+      };
     }
 
     function getRectCenter(rect) {
@@ -2290,18 +2637,6 @@
     // surface height while staying far too small to yank the runner onto some
     // other block that happens to sit just below them.
     const SLOPE_SNAP_DISTANCE = 6;
-
-    // Screen space position of the little rotation handle, floating straight
-    // out from the middle of the rect's top edge.
-    function getRotationHandleScreenPos(rect) {
-      const up = getRectUp(rect);
-      const anchor = rectToWorld(rect, rect.w / 2, 0);
-      const sp = worldToScreenEditor(anchor.x, anchor.y);
-      return {
-        x: sp.x + up.x * ROTATION_HANDLE_DISTANCE,
-        y: sp.y + up.y * ROTATION_HANDLE_DISTANCE
-      };
-    }
 
     function isOnRotationHandle(e, rect) {
       const handle = getRotationHandleScreenPos(rect);
@@ -2529,7 +2864,9 @@
         let pushed = false;
 
         for (let rect of rectangles) {
-          if (rect.type === 'obstacle') continue;
+          // Deadly shapes are handled by the touch check, so the solver never
+          // has to reason about them. Everything else is solid and standable.
+          if (isDeadly(rect)) continue;
 
           const box = getPlayerBox(player.x, player.y, totalHeight);
           const push = getBoxRectPushOut(rect, box);
@@ -2649,11 +2986,13 @@
 
       selectedRects = [];
       selectedRect = null;
+      shapePropsRect = null;
       for (let i = rectangles.length - 1; i >= 0; i--) {
         const r = rectangles[i];
         if (pointInRect(r, mouseWorld.x, mouseWorld.y)) {
           selectedRect = r;
           selectedRects = [r];
+          shapePropsRect = r;
           isDragging = true;
           dragOffset = { x: mouseWorld.x - r.x, y: mouseWorld.y - r.y };
           dragStartPositions = [{ x: r.x, y: r.y }];
@@ -2679,11 +3018,14 @@
           w: 144,
           h: 48,
           rotation: 0,
-          type: rectTypeSelect.value
+          spin: 0,
+          type: rectTypeSelect.value,
+          deadly: rectTypeSelect.value === 'obstacle'
         };
         rectangles.push(newRect);
         selectedRect = newRect;
         selectedRects = [newRect];
+        shapePropsRect = newRect;
         isDragging = true;
         dragOffset = { x: mouseWorld.x - newRect.x, y: mouseWorld.y - newRect.y };
         setPlacementMode(false);
@@ -2718,7 +3060,7 @@
           : Math.round(nextRotation * 1000) / 1000;
 
         if (getRectRotation(rect) !== nextRotation) {
-          rect.rotation = nextRotation;
+          setRectRotation(rect, nextRotation);
           sendLevelSync();
         }
         return;
@@ -2765,6 +3107,7 @@
           }
         }
         selectedRect = selectedRects.length > 0 ? selectedRects[0] : null;
+        shapePropsRect = selectedRect;
         dragStartPositions = selectedRects.map(r => ({ x: r.x, y: r.y }));
         isSelecting = false;
       }
@@ -2791,10 +3134,147 @@
       if (selectedRects.length > 0) {
         for (const rect of selectedRects) {
           rect.type = rectTypeSelect.value;
+          // The dropdown is a preset, so it also resets lethality to the new
+          // type's default. Fine grained control lives in the settings window.
+          rect.deadly = rectTypeSelect.value === 'obstacle';
         }
         sendLevelSync();
       }
     });
+
+    // --- Floating settings window for the selected shape --------------------
+
+    function setRectCanvasTransformUnspinned(rect, camX = 0, camY = 0) {
+      const rot = rect.rotation || 0;
+      ctx.translate(rect.x + rect.w / 2 - camX, rect.y + rect.h / 2 - camY);
+      if (rot !== 0) ctx.rotate(rot);
+      ctx.translate(-rect.w / 2, -rect.h / 2);
+    }
+
+    const shapeProps = document.getElementById('shapeProps');
+    const spDeadly = document.getElementById('spDeadly');
+    const spSpin = document.getElementById('spSpin');
+    const spSpinSpeed = document.getElementById('spSpinSpeed');
+    const spSpinDir = document.getElementById('spSpinDir');
+    const spSpinOpts = shapeProps.querySelectorAll('.spSpinOpt');
+
+    // The shape the window currently describes. Edits are applied to whatever is
+    // selected instead, so a multi-selection can be reconfigured in one go, the
+    // same way the type dropdown already behaves.
+    let shapePropsRect = null;
+
+    function getShapePropsTarget() {
+      return shapePropsRect && selectedRects.includes(shapePropsRect) ? shapePropsRect : null;
+    }
+
+    function getSpinDegrees(rect) {
+      return Math.round(Math.abs(rect.spin || 0) / DEG2RAD);
+    }
+
+    function readSpinSpeed() {
+      if (spSpinSpeed.value.trim() === '') return null;
+      const raw = Number(spSpinSpeed.value);
+      if (!isFinite(raw)) return null;
+      return Math.min(MAX_SPIN_DEGREES, Math.max(1, Math.round(raw)));
+    }
+
+    function updateShapePropsSpinRows() {
+      const dimmed = !spSpin.checked;
+      for (const row of spSpinOpts) row.classList.toggle('spDim', dimmed);
+    }
+
+    function applySpinToSelected(commit) {
+      const target = getShapePropsTarget();
+      if (!target) return;
+
+      const degrees = readSpinSpeed();
+      if (degrees === null) {
+        // Half-typed nonsense: leave the shape alone until the value is
+        // committed, rather than snapping it to some fallback mid-keystroke.
+        if (commit) spSpinSpeed.value = getSpinDegrees(target) || 45;
+        return;
+      }
+      if (commit) spSpinSpeed.value = degrees;
+
+      // Stored signed, as radians a second, with the direction select supplying
+      // the sign so the checkbox alone is enough to switch it off.
+      const magnitude = degrees * DEG2RAD * Number(spSpinDir.value);
+      for (const rect of selectedRects) {
+        rect.spin = spSpin.checked ? magnitude : 0;
+      }
+      sendLevelSync();
+    }
+
+    spDeadly.addEventListener('change', () => {
+      if (!getShapePropsTarget()) return;
+      for (const rect of selectedRects) rect.deadly = spDeadly.checked;
+      sendLevelSync();
+    });
+
+    spSpin.addEventListener('change', () => {
+      if (spSpin.checked && readSpinSpeed() === null) spSpinSpeed.value = 45;
+      updateShapePropsSpinRows();
+      applySpinToSelected(true);
+    });
+
+    // Live while typing so the shape spins as the number changes. Focus is only
+    // handed back on commit, since dropping it on every keystroke would make the
+    // field impossible to type into.
+    spSpinSpeed.addEventListener('input', () => applySpinToSelected(false));
+    spSpinSpeed.addEventListener('change', (e) => {
+      applySpinToSelected(true);
+      e.target.blur();
+    });
+
+    spSpinDir.addEventListener('change', () => applySpinToSelected(true));
+
+    function updateShapeProps() {
+      if (!isEditor || selectedRects.length !== 1) {
+        shapeProps.style.display = 'none';
+        shapePropsRect = null;
+        return;
+      }
+
+      const rect = selectedRects[0];
+      shapePropsRect = rect;
+
+      spDeadly.checked = isDeadly(rect);
+      const isSpinning = !!rect.spin;
+      spSpin.checked = isSpinning;
+
+      document.querySelectorAll('#shapeProps .spSpinOpt').forEach(el => {
+        el.style.display = isSpinning ? 'flex' : 'none';
+      });
+
+      if (isSpinning) {
+        spSpinSpeed.value = Math.round(Math.abs(rect.spin) * (180 / Math.PI));
+        spSpinDir.value = rect.spin >= 0 ? '1' : '-1';
+      }
+
+      const topLeft = rectToWorldUnspinned(rect, 0, 0);
+      const sp = worldToScreenEditor(topLeft.x, topLeft.y);
+
+      shapeProps.style.display = 'flex';
+      const boxWidth = shapeProps.offsetWidth || 130;
+      const boxHeight = shapeProps.offsetHeight || 90;
+      
+      // 5px to the right, 5px down from the shape's top-left corner
+      let left = sp.x + 5;
+      let top = sp.y + 5;
+
+      // If the panel goes off the right edge of the screen, shift it left
+      if (left + boxWidth > width - 8) left = width - boxWidth - 8;
+      // If the panel goes off the bottom edge of the screen, shift it up
+      if (top + boxHeight > height - 8) top = height - boxHeight - 8;
+
+      shapeProps.style.left = `${Math.round(left)}px`;
+      shapeProps.style.top = `${Math.round(top)}px`;
+      
+      // Rotate the panel to match the shape's base rotation
+      const deg = (rect.rotation || 0) * (180 / Math.PI);
+      shapeProps.style.transformOrigin = '0 0';
+      shapeProps.style.transform = `rotate(${deg}deg)`;
+    }
 
     window.addEventListener('keydown', (e) => {
       if (document.activeElement.tagName === 'INPUT') return;
@@ -2826,6 +3306,7 @@
           rectangles.push(...pastedRects);
           selectedRects = pastedRects;
           selectedRect = pastedRects[0];
+          shapePropsRect = pastedRects[0];
           sendLevelSync();
           e.preventDefault();
         }
@@ -2951,11 +3432,13 @@
 
         selectedRects = [];
         selectedRect = null;
+        shapePropsRect = null;
         for (let i = rectangles.length - 1; i >= 0; i--) {
           const r = rectangles[i];
           if (pointInRect(r, mouseWorld.x, mouseWorld.y)) {
             selectedRect = r;
             selectedRects = [r];
+            shapePropsRect = r;
             isDragging = true;
             dragOffset = { x: mouseWorld.x - r.x, y: mouseWorld.y - r.y };
             dragStartPositions = [{ x: r.x, y: r.y }];
@@ -2979,7 +3462,9 @@
             w: 144,
             h: 48,
             rotation: 0,
-            type: rectTypeSelect.value
+            spin: 0,
+            type: rectTypeSelect.value,
+            deadly: rectTypeSelect.value === 'obstacle'
           };
           rectangles.push(newRect);
           selectedRect = newRect;
@@ -3025,7 +3510,7 @@
           nextRotation = Math.round(nextRotation * 1000) / 1000;
 
           if (getRectRotation(rect) !== nextRotation) {
-            rect.rotation = nextRotation;
+            setRectRotation(rect, nextRotation);
             sendLevelSync();
           }
         } else if (resizeHandle && selectedRect) {
@@ -3073,7 +3558,7 @@
 
     window.onload = async function () {
       await loadDefaultLevel();
-      restartGame();
+      showMainMenu();
       requestAnimationFrame(gameLoop);
     };
   </script>

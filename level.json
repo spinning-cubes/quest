@@ -1,58 +1,120 @@
 [
   {
-    "x": -504,
-    "y": 456,
-    "w": 2040,
-    "h": 408,
-    "type": "grass"
-  },
-  {
-    "x": 288,
-    "y": 312,
-    "w": 192,
-    "h": 48,
-    "type": "platform"
-  },
-  {
-    "x": 648,
+    "x": 168,
     "y": 384,
     "w": 72,
     "h": 72,
-    "type": "obstacle"
+    "type": "obstacle",
+    "id": "2zie0t-3"
   },
   {
-    "x": 1104,
-    "y": 264,
-    "w": 144,
-    "h": 192,
-    "type": "grass"
+    "id": "2zie0t-9",
+    "x": -648,
+    "y": 456,
+    "w": 2184,
+    "h": 408,
+    "rotation": 0,
+    "spin": 0,
+    "type": "grass",
+    "deadly": false
   },
   {
-    "x": 816,
-    "y": 408,
-    "w": 144,
-    "h": 48,
-    "type": "grass"
+    "id": "2zie0t-b",
+    "x": -1992,
+    "y": -96,
+    "w": 1344,
+    "h": 960,
+    "rotation": 0,
+    "spin": 0,
+    "type": "grass",
+    "deadly": false
   },
   {
-    "x": 960,
-    "y": 336,
-    "w": 144,
+    "id": "2zie0t-d",
+    "x": 595,
+    "y": 84,
+    "w": 1270,
+    "h": 976,
+    "rotation": -0.524,
+    "spin": 0,
+    "type": "grass",
+    "deadly": false
+  },
+  {
+    "id": "2zie0t-f",
+    "x": 1536,
+    "y": -168,
+    "w": 816,
+    "h": 979,
+    "rotation": 0,
+    "spin": 0,
+    "type": "grass",
+    "deadly": false
+  },
+  {
+    "id": "2zie0t-h",
+    "x": 2267,
+    "y": -232,
+    "w": 523,
+    "h": 25,
+    "rotation": -0.262,
+    "spin": 0,
+    "type": "platform",
+    "deadly": false
+  },
+  {
+    "id": "2zie0t-11",
+    "x": 3376,
+    "y": -460,
+    "w": 816,
+    "h": 979,
+    "rotation": 0,
+    "spin": 0,
+    "type": "grass",
+    "deadly": false
+  },
+  {
+    "id": "2zie0t-13",
+    "x": 2349,
+    "y": -189,
+    "w": 24,
+    "h": 148,
+    "rotation": 0.482,
+    "spin": 0,
+    "type": "platform",
+    "deadly": false
+  },
+  {
+    "id": "2zie0t-14",
+    "x": 3338,
+    "y": -449,
+    "w": 24,
     "h": 120,
-    "type": "grass"
+    "rotation": -0.785,
+    "spin": 0,
+    "type": "platform",
+    "deadly": false
   },
   {
-    "x": 1248,
-    "y": 192,
-    "w": 144,
-    "h": 264,
-    "type": "grass"
+    "id": "2zie0t-15",
+    "x": 2957,
+    "y": -405,
+    "w": 429,
+    "h": 25,
+    "rotation": -0.262,
+    "spin": 0,
+    "type": "platform",
+    "deadly": false
   },
   {
-    "x": 1392,
-    "y": 120,
-    "w": 144,
-    "h": 336,
-    "type": "grass"
+    "id": "2zie0t-16",
+    "x": 2961,
+    "y": -348,
+    "w": 24,
+    "h": 190,
+    "rotation": 0,
+    "spin": 0,
+    "type": "platform",
+    "deadly": false
   }
 ]
