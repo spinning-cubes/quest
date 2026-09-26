@@ -273,6 +273,10 @@
       return PLAYER_COLORS[colorIndex(slot)].hex;
     }
 
+    function applyLocalColor() {
+      player.color = getPlayerColor(localSlot);
+    }
+
     function createPeer() {
       const pin = Math.floor(100000 + Math.random() * 900000).toString();
       const p = new Peer(pin, {
