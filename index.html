@@ -236,7 +236,8 @@
       leg1: { x: 0, y: 0 },
       leg2: { x: 0, y: 0 },
       isCrouching: false,
-      crouchFactor: 0
+      crouchFactor: 0,
+      rotation: 0 // Rotation angle in radians
     };
 
     let remotePlayer = null;
@@ -248,14 +249,17 @@
     function initPeerJS() {
       if (peer) return;
 
-      peer = new Peer({
+      // Generate a 6-digit PIN
+      const pin = Math.floor(100000 + Math.random() * 900000).toString();
+
+      peer = new Peer(pin, {
         config: {
           iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
         }
       });
 
       peer.on('open', (id) => {
-        console.log('PeerJS ID:', id);
+        console.log('PeerJS PIN:', id);
       });
 
       peer.on('connection', (connection) => {
@@ -283,6 +287,7 @@
               x: data.x, y: data.y, vx: data.vx, vy: data.vy,
               facing: data.facing, animPhase: data.animPhase,
               isGrounded: data.isGrounded, crouchFactor: data.crouchFactor,
+              rotation: data.rotation || 0,
               isAlive: data.isAlive, color: PALETTE.remotePlayer,
               isEditor: data.isEditor,
               cursorX: data.cursorX, cursorY: data.cursorY,
@@ -327,6 +332,7 @@
           animPhase: player.animPhase,
           isGrounded: player.isGrounded,
           crouchFactor: player.crouchFactor,
+          rotation: player.rotation,
           isAlive: player.isAlive,
           isEditor: isEditor,
           cursorX: mouseWorld.x,
@@ -363,7 +369,7 @@
 
     let particles = [];
     let distanceMetres = 0;
-    const keys = { left: false, right: false, jump: false, shift: false, crouch: false };
+    const keys = { left: false, right: false, jump: false, shift: false, crouch: false, rotateLeft: false, rotateRight: false };
 
     function resize() {
       const dpr = window.devicePixelRatio || 1;
@@ -502,7 +508,6 @@
       ctx.fillStyle = PALETTE.ground;
       for (let r of rectangles) {
         if (r.type !== 'grass') continue;
-        if (isSurfaceOccluded(r.x + r.w / 2, r.y, r)) continue;
 
         const nodesInRect = grassBottomNodes.filter(n => n.x >= r.x && n.x <= r.x + r.w && n.y === r.y);
 
@@ -515,8 +520,6 @@
           const midIdx = Math.floor((r.x + r.w / 2) / NODE_SPACING);
           maxDepth = getPolyDepth(midIdx);
         }
-
-        if (isGrassPolyOccluded(r.x + r.w / 2, r.y, maxDepth, r)) continue;
 
         const coveredRanges = [];
         for (let other of rectangles) {
@@ -716,6 +719,14 @@
       ctx.save();
       ctx.globalAlpha = 0.50;
 
+      // Apply rotation
+      const rotation = p.rotation || 0;
+      const centerX = hipX;
+      const centerY = hipY - headRadius - headGap / 2;
+      ctx.translate(centerX, centerY);
+      ctx.rotate(rotation);
+      ctx.translate(-centerX, -centerY);
+
       const playerColor = p.color || PALETTE.player;
       ctx.fillStyle = playerColor;
       ctx.beginPath();
@@ -814,6 +825,14 @@
       const targetCrouch = keys.crouch && player.isGrounded ? 1 : 0;
       player.crouchFactor += (targetCrouch - player.crouchFactor) * 0.2;
       player.isCrouching = player.crouchFactor > 0.5;
+      
+      // Handle rotation
+      if (keys.rotateLeft) {
+        player.rotation -= 0.08;
+      }
+      if (keys.rotateRight) {
+        player.rotation += 0.08;
+      }
       
       const speedMultiplier = 1 - player.crouchFactor * 0.4;
 
@@ -1170,6 +1189,7 @@
       player.animPhase = 0;
       player.isCrouching = false;
       player.crouchFactor = 0;
+      player.rotation = 0;
       player.leg1 = { x: 0, y: groundY };
       player.leg2 = { x: 0, y: groundY };
       particles = [];
@@ -1589,6 +1609,8 @@
 
       if (e.key === 'Shift') keys.shift = true;
       if (e.code === 'ShiftLeft' || e.code === 'ShiftRight' || e.code === 'ArrowDown' || e.code === 'KeyS') keys.crouch = true;
+      if (e.code === 'KeyQ') keys.rotateLeft = true;
+      if (e.code === 'KeyE') keys.rotateRight = true;
 
       if (isEditor) {
         if ((e.ctrlKey || e.metaKey) && e.code === 'KeyZ') {
@@ -1646,6 +1668,8 @@
 
       if (e.key === 'Shift') keys.shift = false;
       if (e.code === 'ShiftLeft' || e.code === 'ShiftRight' || e.code === 'ArrowDown' || e.code === 'KeyS') keys.crouch = false;
+      if (e.code === 'KeyQ') keys.rotateLeft = false;
+      if (e.code === 'KeyE') keys.rotateRight = false;
       if (e.code === 'KeyA' || e.code === 'ArrowLeft') keys.left = false;
       if (e.code === 'KeyD' || e.code === 'ArrowRight') keys.right = false;
       if (e.code === 'Space' || e.code === 'KeyW' || e.code === 'ArrowUp') keys.jump = false;
