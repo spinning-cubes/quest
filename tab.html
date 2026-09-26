@@ -1,0 +1,943 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chrome-like Tabs with Wisp Fetch</title>
+    <style>
+        html, body { margin:0; padding:0; width:100%; height:100%; background-color:rgb(69,68,77); color:white; font-family:sans-serif; display:flex; flex-direction:column; }
+        .tabs-container { position:relative; display:flex; padding:10px 10px 0 10px; gap:4px; background-color:rgb(69,68,77); overflow-x:auto; overflow-y:hidden; box-sizing:border-box; }
+        .tabs-container::-webkit-scrollbar { display:none; }
+        .tab { position:relative; padding:0 10px; border-top-left-radius:10px; border-top-right-radius:10px; min-width:180px; height:36px; box-sizing:border-box; display:flex; align-items:center; cursor:pointer; user-select:none; }
+        .tab img { margin-right:6px; transform:translateY(-1px); width:16px; height:16px; }
+        .tab .label { flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        .tab-close { display:flex; align-items:center; justify-content:center; width:18px; height:18px; border-radius:50%; cursor:pointer; font-size:11px; line-height:1; margin-left:6px; color:rgba(255,255,255,0.7); }
+        .tab-close:hover { background-color:rgba(255,255,255,0.2); color:white; }
+        .tab-add { display:flex; align-items:center; justify-content:center; width:28px; height:28px; border-radius:50%; cursor:pointer; font-size:18px; color:rgba(255,255,255,0.8); flex-shrink:0; z-index:1; align-self:center; }
+        .tab-add:hover { background-color:rgba(255,255,255,0.15); color:white; }
+        .tab.inactive:hover img { transform:translateY(1px); }
+        .tab.inactive:hover .label { transform:translateY(2px); }
+        .tab.inactive:hover .tab-close { transform:translateY(2px); }
+        .tab.active { background-color:rgb(104,103,114); z-index:1; }
+        .tab.inactive:hover { background-color:rgb(104,103,114); border-radius:8px !important; height:32px; }
+        .tab.active::before { content:''; position:absolute; bottom:0; left:-10px; width:10px; height:10px; border-bottom-right-radius:10px; box-shadow:4px 4px 0 4px rgb(104,103,114); }
+        .tab.active::after { content:''; position:absolute; bottom:0; right:-10px; width:10px; height:10px; border-bottom-left-radius:10px; box-shadow:-4px 4px 0 4px rgb(104,103,114); }
+        .toolbar { display:flex; align-items:center; background-color:rgb(104,103,114); padding:6px 10px; gap:8px; z-index:2; }
+        .search-bar { flex:1; padding:8px 16px; border-radius:20px; border:none; background-color:rgb(69,68,77); color:white; font-size:14px; outline:none; }
+        .search-bar::placeholder { color:rgba(255,255,255,0.5); }
+        .wisp-status { font-size:12px; padding:4px 8px; border-radius:12px; background:rgba(0,0,0,0.2); white-space:nowrap; }
+        .wisp-status.connected { color:#81c784; }
+        .wisp-status.disconnected { color:#e57373; }
+        .content-viewport { position:relative; z-index:2; flex:1; background-color:rgb(104,103,114); }
+        iframe { width:100%; height:100%; border:none; display:none; background-color:white; }
+        iframe.active { display:block; }
+        .settings-btn { display:flex; align-items:center; justify-content:center; width:32px; height:32px; border-radius:50%; cursor:pointer; font-size:18px; color:rgba(255,255,255,0.8); background:transparent; border:none; transition:background 0.2s, transform 0.3s; }
+        .settings-btn:hover { background-color:rgba(255,255,255,0.15); color:white; }
+        .settings-btn.open { transform:rotate(90deg); }
+        .settings-modal { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.6); z-index:1000; align-items:center; justify-content:center; }
+        .settings-modal.open { display:flex; }
+        .settings-content { background:rgb(69,68,77); padding:24px; border-radius:12px; width:440px; max-width:90%; box-shadow:0 10px 40px rgba(0,0,0,0.5); }
+        .settings-content h2 { margin:0 0 20px 0; font-size:20px; }
+        .settings-field { margin-bottom:16px; }
+        .settings-field label { display:block; margin-bottom:6px; color:rgba(255,255,255,0.8); font-size:13px; }
+        .settings-field input { width:100%; padding:10px 12px; border-radius:8px; border:1px solid rgba(255,255,255,0.1); background:rgb(104,103,114); color:white; font-size:14px; box-sizing:border-box; outline:none; }
+        .settings-field input:focus { border-color:#81c784; }
+        .settings-field .hint { font-size:11px; color:rgba(255,255,255,0.5); margin-top:4px; }
+        .settings-actions { display:flex; gap:8px; justify-content:flex-end; margin-top:8px; }
+        .settings-actions button { padding:8px 16px; border-radius:8px; border:none; cursor:pointer; font-size:14px; font-weight:500; }
+        .btn-save { background:#81c784; color:rgb(40,40,40); }
+        .btn-save:hover { background:#66bb6a; }
+        .btn-cancel { background:rgba(255,255,255,0.1); color:white; }
+        .btn-cancel:hover { background:rgba(255,255,255,0.2); }
+        .preset-list { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
+        .preset-btn { padding:4px 10px; border-radius:12px; background:rgba(255,255,255,0.08); color:rgba(255,255,255,0.85); border:1px solid rgba(255,255,255,0.1); cursor:pointer; font-size:11px; }
+        .preset-btn:hover { background:rgba(129,199,132,0.2); border-color:#81c784; }
+    </style>
+</head>
+<body>
+    <div class="tabs-container" id="tabs-container">
+        <div class="tab-add" id="add-btn" title="New tab">&#x002B;</div>
+    </div>
+    <div class="toolbar">
+        <input type="text" class="search-bar" id="search-bar" placeholder="Search or enter URL">
+        <button class="settings-btn" id="settings-btn" title="Settings">&#9881;</button>
+        <div class="wisp-status disconnected" id="wisp-status">Initializing transport...</div>
+    </div>
+    <div class="content-viewport" id="viewport"></div>
+    <div class="settings-modal" id="settings-modal">
+        <div class="settings-content">
+            <h2>Settings</h2>
+            <div class="settings-field">
+                <label for="wisp-url-input">Wisp Server URL</label>
+                <input type="text" id="wisp-url-input" placeholder="wss://server.example.com/">
+                <div class="hint">Connection will restart using the new server. Open tabs will reload.</div>
+                <div class="preset-list" id="preset-list"></div>
+            </div>
+            <div class="settings-actions">
+                <button class="btn-cancel" id="settings-cancel">Cancel</button>
+                <button class="btn-save" id="settings-save">Save &amp; Reconnect</button>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import { BareMuxConnection, BareClient } from '@mercuryworkshop/bare-mux';
+        import workerCode from '/node_modules/@mercuryworkshop/bare-mux/dist/worker.js?raw';
+        import epoxyCode from '/node_modules/@mercuryworkshop/epoxy-transport/dist/index.mjs?raw';
+
+        const tabsContainer = document.getElementById('tabs-container');
+        const addBtn = document.getElementById('add-btn');
+        const viewport = document.getElementById('viewport');
+        const searchBar = document.getElementById('search-bar');
+        const statusEl = document.getElementById('wisp-status');
+        const settingsBtn = document.getElementById('settings-btn');
+        const settingsModal = document.getElementById('settings-modal');
+        const wispUrlInput = document.getElementById('wisp-url-input');
+        const settingsCancel = document.getElementById('settings-cancel');
+        const settingsSave = document.getElementById('settings-save');
+        const presetList = document.getElementById('preset-list');
+
+        const WISP_DEFAULT = 'wss://wisp.mercurywork.shop/';
+        const WISP_PRESETS = [
+            { label: 'Mercury (Default)', url: 'wss://wisp.mercurywork.shop/' },
+            { label: 'mercurywork.ga', url: 'wss://wisp.mercurywork.ga/' },
+            { label: 'Xeros.lol', url: 'wss://wisp.xeros.lol/' },
+            { label: 'Abyss', url: 'wss://ws.abys.rocks/' }
+        ];
+
+        let wispUrl = localStorage.getItem('wispUrl') || WISP_DEFAULT;
+        let tabCount = 0;
+        let activeTabId = null;
+        let isTransportReady = false;
+        let client = null;
+        let connection = null;
+        let workerUrl = null;
+        let epoxyUrl = null;
+
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.getRegistrations().then(regs => { regs.forEach(reg => reg.unregister()); });
+        }
+
+        function openSettings() { wispUrlInput.value = wispUrl; settingsModal.classList.add('open'); settingsBtn.classList.add('open'); }
+        function closeSettings() { settingsModal.classList.remove('open'); settingsBtn.classList.remove('open'); }
+
+        WISP_PRESETS.forEach(preset => {
+            const btn = document.createElement('button');
+            btn.className = 'preset-btn'; btn.textContent = preset.label; btn.title = preset.url;
+            btn.addEventListener('click', () => { wispUrlInput.value = preset.url; });
+            presetList.appendChild(btn);
+        });
+
+        settingsBtn.addEventListener('click', () => { settingsModal.classList.contains('open') ? closeSettings() : openSettings(); });
+        settingsCancel.addEventListener('click', closeSettings);
+        settingsModal.addEventListener('click', (e) => { if (e.target === settingsModal) closeSettings(); });
+
+        settingsSave.addEventListener('click', async () => {
+            let newUrl = wispUrlInput.value.trim();
+            if (!newUrl || !/^wss?:\/\//.test(newUrl)) { alert('Wisp URL must start with wss:// or ws://'); return; }
+            wispUrl = newUrl;
+            localStorage.setItem('wispUrl', wispUrl);
+            closeSettings();
+            isTransportReady = false;
+            statusEl.textContent = 'Reconnecting...';
+            statusEl.className = 'wisp-status disconnected';
+            try {
+                await connection.setTransport(epoxyUrl, [{ wisp: wispUrl }]);
+                isTransportReady = true;
+                statusEl.textContent = 'Wisp: Ready';
+                statusEl.className = 'wisp-status connected';
+                viewport.querySelectorAll('iframe[data-url]').forEach(iframe => {
+                    const url = iframe.dataset.url;
+                    const id = iframe.id.replace('iframe-', '');
+                    if (url && url !== 'about:blank') loadUrlViaWisp(iframe, url, id);
+                });
+            } catch (err) {
+                statusEl.textContent = 'Error: ' + err.message;
+                statusEl.className = 'wisp-status disconnected';
+            }
+        });
+
+        // ════════════════════════════════════════════════════════════════
+        // INTERCEPTOR — runs inside each iframe's srcdoc context
+        // ════════════════════════════════════════════════════════════════
+        function interceptor(baseUrl, tabId) {
+            // Save real parent BEFORE spoofing window.parent
+            const realParent = window.parent;
+            const wispFetch = realParent.wispFetch;
+
+            let pendingScripts = 0;
+            let pendingMediaResolvers = [];
+            function waitForScripts() {
+                return new Promise(resolve => {
+                    if (pendingScripts === 0) resolve();
+                    else pendingMediaResolvers.push(resolve);
+                });
+            }
+
+            function handleNavigation(url) {
+                try {
+                    let absoluteUrl = new URL(url, baseUrl).href;
+                    if (absoluteUrl.startsWith('http')) {
+                        realParent.handleIframeNavigation(absoluteUrl, tabId);
+                        return true;
+                    }
+                } catch(e) {}
+                return false;
+            }
+
+            // ─── Function.prototype.toString spoofing ───
+            const nativeToString = Function.prototype.toString;
+            const toStringMap = new WeakMap();
+            function spoofToString(func, nativeStr) { try { toStringMap.set(func, nativeStr); } catch(e) {} }
+            const patchedToString = function toString() {
+                if (toStringMap.has(this)) return toStringMap.get(this);
+                return nativeToString.call(this);
+            };
+            Function.prototype.toString = patchedToString;
+            spoofToString(patchedToString, 'function toString() { [native code] }');
+
+            // ─── Location.prototype spoofing ───
+            const spoofedUrl = new URL(baseUrl);
+            const locProps = {
+                href: baseUrl, origin: spoofedUrl.origin, protocol: spoofedUrl.protocol,
+                host: spoofedUrl.host, hostname: spoofedUrl.hostname, port: spoofedUrl.port,
+                pathname: spoofedUrl.pathname, search: spoofedUrl.search, hash: spoofedUrl.hash
+            };
+            for (const [prop, spoofedValue] of Object.entries(locProps)) {
+                try {
+                    const existingDesc = Object.getOwnPropertyDescriptor(Location.prototype, prop);
+                    const newDesc = { get: function() { return spoofedValue; }, configurable: true };
+                    if (existingDesc && existingDesc.set) {
+                        newDesc.set = function(v) { if (handleNavigation(v)) return; existingDesc.set.call(this, v); };
+                    }
+                    Object.defineProperty(Location.prototype, prop, newDesc);
+                } catch(e) {}
+            }
+            try { Object.defineProperty(Location.prototype, 'toString', { value: function toString() { return baseUrl; }, configurable: true, writable: true }); spoofToString(Location.prototype.toString, 'function toString() { [native code] }'); } catch(e) {}
+
+            // ─── Document URL properties ───
+            try {
+                Object.defineProperty(document, 'URL', { get: () => baseUrl, configurable: true });
+                Object.defineProperty(document, 'documentURI', { get: () => baseUrl, configurable: true });
+                Object.defineProperty(document, 'baseURI', { get: () => baseUrl, configurable: true });
+                Object.defineProperty(document, 'domain', { get: () => spoofedUrl.hostname, configurable: true });
+                Object.defineProperty(document, 'referrer', { get: () => '', configurable: true });
+            } catch(e) {}
+
+            // ─── document.cookie fake store ───
+            const fakeCookieStore = {};
+            try {
+                Object.defineProperty(Document.prototype, 'cookie', {
+                    get: function() { return Object.entries(fakeCookieStore).map(([k,v]) => `${k}=${v}`).join('; '); },
+                    set: function(v) { try { const p = v.split(';')[0].split('='); const n = p[0].trim(); const val = p.slice(1).join('=').trim(); if (n) fakeCookieStore[n] = val; } catch(e) {} },
+                    configurable: true
+                });
+            } catch(e) {}
+
+            // ─── Window frame spoofing ───
+            try { Object.defineProperty(window, 'top', { get: () => window, configurable: true }); } catch(e) {}
+            try { Object.defineProperty(window, 'parent', { get: () => window, configurable: true }); } catch(e) {}
+            try { Object.defineProperty(window, 'self', { get: () => window, configurable: true }); } catch(e) {}
+            try { Object.defineProperty(window, 'frames', { get: () => window, configurable: true }); } catch(e) {}
+            try { Object.defineProperty(window, 'frameElement', { get: () => null, configurable: true }); } catch(e) {}
+            try { Object.defineProperty(window, 'origin', { get: () => spoofedUrl.origin, configurable: true }); } catch(e) {}
+            try { Object.defineProperty(window, 'outerWidth', { get: () => window.innerWidth, configurable: true }); } catch(e) {}
+            try { Object.defineProperty(window, 'outerHeight', { get: () => window.innerHeight + 88, configurable: true }); } catch(e) {}
+            try { Object.defineProperty(window, 'screenX', { get: () => 0, configurable: true }); } catch(e) {}
+            try { Object.defineProperty(window, 'screenY', { get: () => 0, configurable: true }); } catch(e) {}
+
+            // ─── Navigator spoofing ───
+            try { Object.defineProperty(Navigator.prototype, 'webdriver', { get: () => false, configurable: true }); } catch(e) {}
+            try {
+                const fakePlugins = [
+                    { name:'Chrome PDF Plugin', filename:'internal-pdf-viewer', description:'Portable Document Format' },
+                    { name:'Chrome PDF Viewer', filename:'mhjfbmdgcfjbbpaeojofohoeflnfodb', description:'' },
+                    { name:'Native Client', filename:'internal-nacl-plugin', description:'' }
+                ];
+                Object.defineProperty(Navigator.prototype, 'plugins', { get: () => { const a = fakePlugins.slice(); a.item = i => a[i]||null; a.namedItem = n => a.find(p=>p.name===n)||null; a.refresh = ()=>{}; return a; }, configurable: true });
+            } catch(e) {}
+            try { Object.defineProperty(Navigator.prototype, 'languages', { get: () => [navigator.language||'en-US','en-US','en'], configurable: true }); } catch(e) {}
+            try {
+                const nq = navigator.permissions.query.bind(navigator.permissions);
+                const pq = function query(d) { if (d && d.name === 'notifications') return Promise.resolve({state:'prompt',onchange:null}); return nq(d); };
+                navigator.permissions.query = pq; spoofToString(pq, 'function query() { [native code] }');
+            } catch(e) {}
+            if (window.Notification) { try { Object.defineProperty(Notification, 'permission', { get: () => 'default', configurable: true }); } catch(e) {} }
+            if (navigator.deviceMemory === undefined) { try { Object.defineProperty(Navigator.prototype, 'deviceMemory', { get: () => 8, configurable: true }); } catch(e) {} }
+
+            // ─── window.chrome ───
+            if (!window.chrome) {
+                try {
+                    window.chrome = { runtime: {}, loadTimes: () => ({}), csi: () => ({}), app: { isInstalled: false, InstallState: {DISABLED:'disabled',INSTALLED:'installed',NOT_INSTALLED:'not_installed'}, RunningState: {CANNOT_RUN:'cannot_run',READY_TO_RUN:'ready_to_run',RUNNING:'running'} } };
+                } catch(e) {}
+            }
+
+            // ─── WebGL spoofing ───
+            try {
+                const gp = WebGLRenderingContext.prototype.getParameter;
+                const pgp = function getParameter(p) { if (p===37445) return 'Google Inc. (NVIDIA)'; if (p===37446) return 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)'; return gp.call(this, p); };
+                WebGLRenderingContext.prototype.getParameter = pgp; spoofToString(pgp, 'function getParameter() { [native code] }');
+            } catch(e) {}
+
+            // ════════════════════════════════════════════════════════════
+            // URL constructor patch
+            // In srcdoc, new URL('/path') resolves against about:srcdoc.
+            // We make it resolve against baseUrl so relative URLs work.
+            // ════════════════════════════════════════════════════════════
+            const NativeURL = window.URL;
+            class PatchedURL extends NativeURL {
+                constructor(url, base) {
+                    if (!base && typeof url === 'string') {
+                        // If it's a relative URL (no scheme), use baseUrl
+                        if (!/^[a-zA-Z][a-zA-Z0-9+.\-.]*:/.test(url)) {
+                            base = baseUrl;
+                        }
+                    }
+                    super(url, base);
+                }
+            }
+            // Copy static methods
+            if (NativeURL.createObjectURL) PatchedURL.createObjectURL = NativeURL.createObjectURL;
+            if (NativeURL.revokeObjectURL) PatchedURL.revokeObjectURL = NativeURL.revokeObjectURL;
+            window.URL = PatchedURL;
+            spoofToString(PatchedURL, 'function URL() { [native code] }');
+
+            // ════════════════════════════════════════════════════════════
+            // Request constructor patch
+            // new Request('/path') in srcdoc resolves against about:srcdoc.
+            // We intercept and resolve against baseUrl.
+            // ════════════════════════════════════════════════════════════
+            const NativeRequest = window.Request;
+            class PatchedRequest extends NativeRequest {
+                constructor(input, init) {
+                    if (typeof input === 'string' && !/^[a-zA-Z][a-zA-Z0-9+.\-.]*:/.test(input)) {
+                        try { input = new NativeURL(input, baseUrl).href; } catch(e) {}
+                    }
+                    super(input, init);
+                }
+            }
+            window.Request = PatchedRequest;
+            spoofToString(PatchedRequest, 'function Request() { [native code] }');
+
+            // ════════════════════════════════════════════════════════════
+            // PROXY FETCH
+            // Handles: about: URLs from pre-patch Request objects,
+            // fake cookie injection, relative URL resolution
+            // ════════════════════════════════════════════════════════════
+            async function proxyFetch(input, init) {
+                let url = input instanceof NativeRequest ? input.url : (input instanceof PatchedRequest ? input.url : (typeof input === 'string' ? input : (input && input.url ? input.url : String(input))));
+
+                // Handle about: URLs — these come from Request/URL objects created
+                // BEFORE our patch was applied, or from browser-internal resolution
+                if (typeof url === 'string' && url.startsWith('about:')) {
+                    let match = url.match(/^about:[^/]*\/\/?\/?(.*)$/);
+                    if (match) {
+                        let path = match[1];
+                        if (path && !path.startsWith('/')) path = '/' + path;
+                        if (!path) path = '/';
+                        try { url = new NativeURL(path, baseUrl).href; } catch(e) {}
+                    }
+                }
+
+                // Resolve relative URLs
+                if (typeof url === 'string' && !url.startsWith('http') && !url.startsWith('data:') && !url.startsWith('blob:') && !url.startsWith('javascript:')) {
+                    try { url = new NativeURL(url, baseUrl).href; } catch(e) {}
+                }
+
+                let newInit = init || {};
+                if (input instanceof NativeRequest || input instanceof PatchedRequest) {
+                    newInit.method = newInit.method || input.method;
+                    newInit.headers = newInit.headers || input.headers;
+                    newInit.body = newInit.body || input.body;
+                    newInit.credentials = newInit.credentials || input.credentials;
+                    newInit.mode = newInit.mode || input.mode;
+                    newInit.signal = newInit.signal || input.signal;
+                }
+
+                // ── Inject fake cookies ──
+                // Google sets cookies via document.cookie then checks they come back
+                // with subsequent requests. We inject our fake cookie store as a
+                // Cookie header so the server sees them.
+                if (newInit.credentials !== 'omit') {
+                    const cookieStr = Object.entries(fakeCookieStore).map(([k,v]) => `${k}=${v}`).join('; ');
+                    if (cookieStr) {
+                        if (!newInit.headers) newInit.headers = {};
+                        if (newInit.headers instanceof Headers) {
+                            if (!newInit.headers.has('Cookie')) newInit.headers.append('Cookie', cookieStr);
+                        } else if (Array.isArray(newInit.headers)) {
+                            if (!newInit.headers.some(([k]) => k.toLowerCase() === 'cookie')) {
+                                newInit.headers.push(['Cookie', cookieStr]);
+                            }
+                        } else {
+                            const keys = Object.keys(newInit.headers);
+                            if (!keys.some(k => k.toLowerCase() === 'cookie')) {
+                                newInit.headers['Cookie'] = cookieStr;
+                            }
+                        }
+                    }
+                }
+
+                return wispFetch(url, newInit, baseUrl);
+            }
+
+            const patchedFetch = function fetch(input, init) { return proxyFetch(input, init); };
+            window.fetch = patchedFetch;
+            spoofToString(patchedFetch, 'function fetch() { [native code] }');
+
+            // ── sendBeacon ──
+            if (navigator.sendBeacon) {
+                const patchedBeacon = function sendBeacon(url, data) {
+                    let absUrl = url;
+                    try { if (!absUrl.startsWith('http') && !absUrl.startsWith('data:') && !absUrl.startsWith('blob:') && !absUrl.startsWith('javascript:')) absUrl = new NativeURL(absUrl, baseUrl).href; } catch(e) {}
+                    proxyFetch(absUrl, { method: 'POST', body: data, headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }).catch(() => {});
+                    return true;
+                };
+                navigator.sendBeacon = patchedBeacon;
+                spoofToString(patchedBeacon, 'function sendBeacon() { [native code] }');
+            }
+
+            // ── XHR ──
+            const NativeXHR = window.XMLHttpRequest;
+            const PatchedXHR = class XMLHttpRequest extends NativeXHR {
+                constructor() { super(); this._headers = {}; this._method = 'GET'; this._url = ''; }
+                open(method, url, ...args) { this._method = method; this._url = url; try { super.open(method, 'about:blank', ...args); } catch(e) {} }
+                setRequestHeader(name, value) { this._headers[name] = value; try { super.setRequestHeader(name, value); } catch(e) {} }
+                send(body) {
+                    let absUrl = this._url;
+                    try {
+                        if (!absUrl.startsWith('http') && !absUrl.startsWith('data:') && !absUrl.startsWith('blob:') && !absUrl.startsWith('javascript:')) {
+                            absUrl = new NativeURL(absUrl, baseUrl).href;
+                        }
+                    } catch(e) {}
+                    // Inject fake cookies
+                    const cookieStr = Object.entries(fakeCookieStore).map(([k,v]) => `${k}=${v}`).join('; ');
+                    if (cookieStr && !Object.keys(this._headers).some(k => k.toLowerCase() === 'cookie')) {
+                        this._headers['Cookie'] = cookieStr;
+                    }
+                    proxyFetch(absUrl, { method: this._method, body: body, headers: this._headers })
+                        .then(async res => {
+                            const blob = await res.blob();
+                            const reader = new FileReader();
+                            reader.onload = () => {
+                                try {
+                                    Object.defineProperty(this, 'responseText', { value: reader.result, writable: true });
+                                    Object.defineProperty(this, 'response', { value: reader.result, writable: true });
+                                    Object.defineProperty(this, 'status', { value: res.status, writable: true });
+                                    Object.defineProperty(this, 'statusText', { value: res.statusText, writable: true });
+                                    Object.defineProperty(this, 'readyState', { value: 4, writable: true });
+                                    Object.defineProperty(this, 'responseURL', { value: absUrl, writable: true });
+                                    if (this.onreadystatechange) this.onreadystatechange();
+                                    if (this.onload) this.onload();
+                                    this.dispatchEvent(new Event('load'));
+                                    this.dispatchEvent(new Event('loadend'));
+                                } catch(e) { console.error("XHR hook error:", e); }
+                            };
+                            reader.readAsText(blob);
+                        })
+                        .catch(err => {
+                            Object.defineProperty(this, 'status', { value: 500, writable: true });
+                            Object.defineProperty(this, 'readyState', { value: 4, writable: true });
+                            if (this.onerror) this.onerror(err);
+                            this.dispatchEvent(new Event('error'));
+                            this.dispatchEvent(new Event('loadend'));
+                        });
+                }
+            };
+            window.XMLHttpRequest = PatchedXHR;
+            spoofToString(PatchedXHR, 'function XMLHttpRequest() { [native code] }');
+
+            // ── Element src/href patching ──
+            function patchSrc(prototype) {
+                const desc = Object.getOwnPropertyDescriptor(prototype, 'src');
+                if (!desc || !desc.set || !desc.get) return;
+                Object.defineProperty(prototype, 'src', {
+                    set: function(value) {
+                        if (typeof value === 'string' && !value.startsWith('data:') && !value.startsWith('blob:') && !value.startsWith('javascript:')) {
+                            let abs; try { if (!value.startsWith('http')) abs = new NativeURL(value, baseUrl).href; else abs = value; } catch(e) { abs = value; }
+                            waitForScripts().then(() => {
+                                proxyFetch(abs).then(res => res.blob()).then(blob => { desc.set.call(this, URL.createObjectURL(blob)); }).catch(() => desc.set.call(this, value));
+                            });
+                        } else { desc.set.call(this, value); }
+                    },
+                    get: desc.get, configurable: true
+                });
+            }
+            function patchHref(prototype) {
+                const desc = Object.getOwnPropertyDescriptor(prototype, 'href');
+                if (!desc || !desc.set || !desc.get) return;
+                Object.defineProperty(prototype, 'href', {
+                    set: function(value) {
+                        if (typeof value === 'string' && !value.startsWith('data:') && !value.startsWith('blob:') && !value.startsWith('javascript:')) {
+                            let abs; try { if (!value.startsWith('http')) abs = new NativeURL(value, baseUrl).href; else abs = value; } catch(e) { abs = value; }
+                            proxyFetch(abs).then(res => res.blob()).then(blob => { desc.set.call(this, URL.createObjectURL(blob)); }).catch(() => desc.set.call(this, value));
+                        } else { desc.set.call(this, value); }
+                    },
+                    get: desc.get, configurable: true
+                });
+            }
+            patchSrc(HTMLImageElement.prototype); patchSrc(HTMLMediaElement.prototype);
+            patchSrc(HTMLSourceElement.prototype); patchSrc(HTMLEmbedElement.prototype);
+            patchHref(HTMLLinkElement.prototype);
+
+            // ── Script src patching ──
+            const scriptUrlMap = new Map();
+            const scriptSrcDesc = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, 'src');
+            if (scriptSrcDesc && scriptSrcDesc.set) {
+                Object.defineProperty(HTMLScriptElement.prototype, 'src', {
+                    set: function(value) {
+                        if (typeof value === 'string' && !value.startsWith('data:') && !value.startsWith('blob:') && !value.startsWith('javascript:')) {
+                            let abs; try { if (!value.startsWith('http')) abs = new NativeURL(value, baseUrl).href; else abs = value; } catch(e) { abs = value; }
+                            pendingScripts++;
+                            proxyFetch(abs).then(res => res.blob()).then(blob => {
+                                const blobUrl = URL.createObjectURL(blob);
+                                scriptSrcDesc.set.call(this, blobUrl);
+                                this.setAttribute('data-orig-src', abs);
+                            }).catch(err => { console.error("Failed to fetch script", abs, err); }).finally(() => {
+                                pendingScripts--;
+                                if (pendingScripts === 0) { pendingMediaResolvers.forEach(r => r()); pendingMediaResolvers = []; }
+                            });
+                        } else { scriptSrcDesc.set.call(this, value); }
+                    },
+                    get: function() { const b = scriptSrcDesc.get.call(this); return this.getAttribute('data-orig-src') || scriptUrlMap.get(b) || b; },
+                    configurable: true
+                });
+            }
+
+            // ── Iframe src patching ──
+            const iframeSrcDesc = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'src');
+            if (iframeSrcDesc && iframeSrcDesc.set && iframeSrcDesc.get) {
+                Object.defineProperty(HTMLIFrameElement.prototype, 'src', {
+                    set: function(value) {
+                        if (typeof value === 'string' && !value.startsWith('data:') && !value.startsWith('blob:') && !value.startsWith('javascript:')) {
+                            let abs; try { if (!value.startsWith('http')) abs = new NativeURL(value, baseUrl).href; else abs = value; } catch(e) { abs = value; }
+                            proxyFetch(abs).then(async res => {
+                                let html = await res.text();
+                                const parser = new DOMParser();
+                                const doc = parser.parseFromString(html, 'text/html');
+                                const nested = abs;
+                                const base = doc.createElement('base'); base.href = nested;
+                                doc.head ? doc.head.prepend(base) : doc.documentElement.prepend(base);
+                                const meta = doc.createElement('meta'); meta.setAttribute('charset', 'utf-8');
+                                doc.head.insertBefore(meta, base.nextSibling);
+                                doc.querySelectorAll('meta[http-equiv="refresh"], meta[http-equiv="Content-Security-Policy"]').forEach(m => m.remove());
+                                doc.querySelectorAll('script[integrity], link[integrity]').forEach(el => el.removeAttribute('integrity'));
+                                doc.querySelectorAll('[crossorigin]').forEach(el => el.removeAttribute('crossorigin'));
+                                const script = doc.createElement('script');
+                                script.textContent = `(${interceptor.toString()})(${JSON.stringify(nested)}, ${JSON.stringify(tabId)});`;
+                                doc.head.insertBefore(script, meta.nextSibling);
+                                const rwPromises = [];
+                                doc.querySelectorAll('script[src]').forEach(el => {
+                                    const val = el.getAttribute('src');
+                                    if (!val || val.startsWith('data:') || val.startsWith('blob:') || val.startsWith('javascript:')) return;
+                                    let su; try { su = new NativeURL(val, nested).href; } catch { return; }
+                                    const p = proxyFetch(su).then(res => res.blob()).then(blob => {
+                                        el.setAttribute('src', URL.createObjectURL(blob));
+                                        el.setAttribute('data-orig-src', su);
+                                    }).catch(err => { console.error(`Failed nested script: ${su}`, err); el.remove(); });
+                                    rwPromises.push(p);
+                                });
+                                await Promise.all(rwPromises);
+                                this.removeAttribute('src');
+                                this.setAttribute('srcdoc', doc.documentElement.outerHTML);
+                            }).catch(() => { iframeSrcDesc.set.call(this, value); });
+                            return;
+                        }
+                        iframeSrcDesc.set.call(this, value);
+                    },
+                    get: iframeSrcDesc.get, configurable: true
+                });
+            }
+
+            // ── Navigation interceptors ──
+            const nativeOpen = window.open;
+            const patchedOpen = function open(url, ...args) {
+                if (url) {
+                    let abs; try { if (!url.startsWith('http')) abs = new NativeURL(url, baseUrl).href; else abs = url; } catch(e) {}
+                    if (abs && abs.startsWith('http')) {
+                        realParent.handleIframeNavigation(abs, tabId);
+                        return { closed: false, close: () => { this.closed = true; }, postMessage: () => {}, focus: () => {}, blur: () => {}, location: { href: abs, replace: () => {}, assign: () => {} } };
+                    }
+                }
+                return nativeOpen.call(this, url, ...args);
+            };
+            window.open = patchedOpen; spoofToString(patchedOpen, 'function open() { [native code] }');
+
+            const nativeAssign = Location.prototype.assign;
+            const nativeReplace = Location.prototype.replace;
+            const pAssign = function assign(url) { if (handleNavigation(url)) return; nativeAssign.call(this, url); };
+            const pReplace = function replace(url) { if (handleNavigation(url)) return; nativeReplace.call(this, url); };
+            Location.prototype.assign = pAssign; Location.prototype.replace = pReplace;
+            spoofToString(pAssign, 'function assign() { [native code] }'); spoofToString(pReplace, 'function replace() { [native code] }');
+
+            try {
+                const dld = Object.getOwnPropertyDescriptor(Document.prototype, 'location');
+                if (dld && dld.set) { Object.defineProperty(Document.prototype, 'location', { get: dld.get, set: function(v) { if (handleNavigation(v)) return; dld.set.call(this, v); }, configurable: true }); }
+            } catch(e) {}
+
+            document.addEventListener('submit', (e) => {
+                const form = e.target;
+                if (form && form.tagName === 'FORM') {
+                    e.preventDefault(); e.stopPropagation();
+                    const action = form.getAttribute('action') || baseUrl;
+                    const method = (form.getAttribute('method') || 'GET').toUpperCase();
+                    const fd = new FormData(form);
+                    let url;
+                    if (method === 'GET') { const params = new URLSearchParams(fd).toString(); url = new NativeURL(action, baseUrl).href; url += (url.includes('?') ? '&' : '?') + params; }
+                    else { url = new NativeURL(action, baseUrl).href; }
+                    handleNavigation(url);
+                }
+            }, true);
+
+            HTMLFormElement.prototype.submit = function() {
+                const action = this.getAttribute('action') || baseUrl;
+                const method = (this.getAttribute('method') || 'GET').toUpperCase();
+                const fd = new FormData(this);
+                let url;
+                if (method === 'GET') { const params = new URLSearchParams(fd).toString(); url = new NativeURL(action, baseUrl).href; url += (url.includes('?') ? '&' : '?') + params; }
+                else { url = new NativeURL(action, baseUrl).href; }
+                handleNavigation(url);
+            };
+
+            document.addEventListener('click', (e) => {
+                let target = e.target;
+                while (target && target.tagName !== 'A' && target.tagName !== 'AREA' && target.tagName !== 'FORM' && target.tagName !== 'HTML') { target = target.parentElement; }
+                if (target && (target.tagName === 'A' || target.tagName === 'AREA') && target.href) {
+                    e.preventDefault(); e.stopPropagation();
+                    // target.href is resolved by browser using <base>, so it should be correct
+                    // But if <base> wasn't applied yet, resolve manually
+                    let href = target.getAttribute('href');
+                    try { href = new NativeURL(href, baseUrl).href; } catch(e) { href = target.href; }
+                    handleNavigation(href);
+                } else if (e.target.tagName === 'INPUT' && e.target.type === 'submit') {
+                    let form = e.target.form;
+                    if (form) {
+                        e.preventDefault(); e.stopPropagation();
+                        const action = form.getAttribute('action') || baseUrl;
+                        const method = (form.getAttribute('method') || 'GET').toUpperCase();
+                        const fd = new FormData(form);
+                        let url;
+                        if (method === 'GET') { const params = new URLSearchParams(fd).toString(); url = new NativeURL(action, baseUrl).href; url += (url.includes('?') ? '&' : '?') + params; }
+                        else { url = new NativeURL(action, baseUrl).href; }
+                        handleNavigation(url);
+                    }
+                }
+            }, true);
+
+            const nativePS = History.prototype.pushState;
+            const nativeRS = History.prototype.replaceState;
+            History.prototype.pushState = function pushState(state, title, url) {
+                if (url) { let abs = new NativeURL(url, baseUrl).href; nativePS.call(this, state, title, abs); realParent.handleIframeNavigation(abs, tabId, false); }
+                else { nativePS.call(this, state, title, url); }
+            };
+            History.prototype.replaceState = function replaceState(state, title, url) {
+                if (url) { let abs = new NativeURL(url, baseUrl).href; nativeRS.call(this, state, title, abs); realParent.handleIframeNavigation(abs, tabId, false); }
+                else { nativeRS.call(this, state, title, url); }
+            };
+            spoofToString(History.prototype.pushState, 'function pushState() { [native code] }');
+            spoofToString(History.prototype.replaceState, 'function replaceState() { [native code] }');
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        // INIT & TRANSPORT
+        // ════════════════════════════════════════════════════════════════
+        async function initAndSetup() {
+            try {
+                const workerBlob = new Blob([workerCode], { type: 'application/javascript' });
+                workerUrl = URL.createObjectURL(workerBlob);
+                const epoxyBlob = new Blob([epoxyCode], { type: 'application/javascript' });
+                epoxyUrl = URL.createObjectURL(epoxyBlob);
+                connection = new BareMuxConnection(workerUrl);
+                await connection.setTransport(epoxyUrl, [{ wisp: wispUrl }]);
+                client = new BareClient();
+
+                // Determine Sec-Fetch-Dest from URL
+                function getDest(url) {
+                    try {
+                        const path = new URL(url).pathname.toLowerCase();
+                        if (path.endsWith('.js') || path.endsWith('.mjs')) return 'script';
+                        if (path.endsWith('.css')) return 'style';
+                        if (/\.(png|jpg|jpeg|gif|svg|webp|ico|bmp|avif)$/.test(path)) return 'image';
+                        if (/\.(woff2?|ttf|otf|eot)$/.test(path)) return 'font';
+                        if (/\.(mp4|webm|ogg|mp3|wav|flac|aac)$/.test(path)) return 'audio';
+                        return 'empty';
+                    } catch(e) { return 'empty'; }
+                }
+
+                window.wispFetch = async (url, opts = {}, refererOrRetries = 3, _isRetry = false) => {
+                    let retries = 3;
+                    let referer = null;
+                    if (typeof refererOrRetries === 'string') referer = refererOrRetries;
+                    else if (typeof refererOrRetries === 'number') retries = refererOrRetries;
+
+                    let normalizedHeaders = [];
+                    if (opts.headers) {
+                        const h = opts.headers;
+                        if (h instanceof Headers) { h.forEach((v, k) => normalizedHeaders.push([k, v])); }
+                        else if (Array.isArray(h)) { normalizedHeaders = h.slice(); }
+                        else if (typeof h === 'object') { for (const k in h) normalizedHeaders.push([k, h[k]]); }
+                    }
+
+                    const has = (name) => normalizedHeaders.some(([k]) => k.toLowerCase() === name.toLowerCase());
+
+                    // Default browser headers
+                    if (!has('user-agent')) normalizedHeaders.push(['User-Agent', navigator.userAgent]);
+                    if (!has('accept') && (!opts.method || opts.method === 'GET')) {
+                        normalizedHeaders.push(['Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8']);
+                    }
+                    if (!has('accept-language')) normalizedHeaders.push(['Accept-Language', navigator.language || 'en-US,en;q=0.9']);
+                    if (!has('accept-encoding')) normalizedHeaders.push(['Accept-Encoding', 'gzip, deflate, br']);
+
+                    // ══════════════════════════════════════════════════════════
+                    // Sec-Fetch-* headers: DIFFERENT for navigation vs subresource
+                    // ══════════════════════════════════════════════════════════
+                    const isNavigation = !referer; // No referer = initial page load
+
+                    if (isNavigation) {
+                        // Navigation request (initial document load)
+                        if (!has('sec-fetch-mode')) normalizedHeaders.push(['Sec-Fetch-Mode', 'navigate']);
+                        if (!has('sec-fetch-site')) normalizedHeaders.push(['Sec-Fetch-Site', 'none']);
+                        if (!has('sec-fetch-dest')) normalizedHeaders.push(['Sec-Fetch-Dest', 'document']);
+                        if (!has('sec-fetch-user')) normalizedHeaders.push(['Sec-Fetch-User', '?1']);
+                        if (!has('upgrade-insecure-requests')) normalizedHeaders.push(['Upgrade-Insecure-Requests', '1']);
+                    } else {
+                        // Subresource request (script, image, API call, etc.)
+                        // Sending Sec-Fetch-Mode: navigate here would make Google's
+                        // server return HTML instead of JS/CSS — breaking everything.
+                        if (!has('sec-fetch-mode')) {
+                            const mode = opts.mode || 'cors';
+                            normalizedHeaders.push(['Sec-Fetch-Mode', mode === 'no-cors' ? 'no-cors' : 'cors']);
+                        }
+                        if (!has('sec-fetch-site')) {
+                            let site = 'cross-site';
+                            try {
+                                const refOrigin = new URL(referer).origin;
+                                const reqOrigin = new URL(url).origin;
+                                if (refOrigin === reqOrigin) site = 'same-origin';
+                                else {
+                                    const getDomain = (h) => { const parts = h.split('.'); return parts.slice(-2).join('.'); };
+                                    if (getDomain(new URL(referer).hostname) === getDomain(new URL(url).hostname)) site = 'same-site';
+                                }
+                            } catch(e) {}
+                            normalizedHeaders.push(['Sec-Fetch-Site', site]);
+                        }
+                        if (!has('sec-fetch-dest')) {
+                            normalizedHeaders.push(['Sec-Fetch-Dest', getDest(url)]);
+                        }
+                    }
+
+                    // Referer and Origin
+                    if (referer && !has('referer')) normalizedHeaders.push(['Referer', referer]);
+                    if (referer && opts.method && opts.method !== 'GET' && !has('origin')) {
+                        try { normalizedHeaders.push(['Origin', new URL(referer).origin]); } catch(e) {}
+                    }
+
+                    opts.headers = normalizedHeaders;
+                    if (!opts.method) opts.method = 'GET';
+                    opts.credentials = 'include';
+
+                    try {
+                        const response = await client.fetch(url, opts);
+                        // Patch response.url to show the target URL, not wisp server URL
+                        try { Object.defineProperty(response, 'url', { get: () => url, configurable: true }); } catch(e) {}
+                        return response;
+                    } catch (err) {
+                        if (retries > 0 && !_isRetry && (err.message.includes('IncompleteMessage') || err.message.includes('connection closed') || err.message.includes('aborted'))) {
+                            await new Promise(r => setTimeout(r, 500));
+                            return window.wispFetch(url, opts, retries - 1, true);
+                        }
+                        throw err;
+                    }
+                };
+
+                window.handleIframeNavigation = (absoluteUrl, tabId, reload = true) => {
+                    const iframe = document.getElementById('iframe-' + tabId);
+                    if (iframe) {
+                        if (reload) loadUrlViaWisp(iframe, absoluteUrl, tabId);
+                        if (tabId === activeTabId) searchBar.value = absoluteUrl;
+                        updateTabTitle(tabId, absoluteUrl);
+                    }
+                };
+
+                isTransportReady = true;
+                statusEl.textContent = 'Wisp: Ready';
+                statusEl.className = 'wisp-status connected';
+                viewport.querySelectorAll('iframe[data-pending-url]').forEach(iframe => {
+                    const url = iframe.dataset.pendingUrl;
+                    delete iframe.dataset.pendingUrl;
+                    loadUrlViaWisp(iframe, url, iframe.id.replace('iframe-', ''));
+                });
+            } catch (err) {
+                console.error("Init Error:", err);
+                statusEl.textContent = 'Error: ' + err.message;
+                statusEl.className = 'wisp-status disconnected';
+            }
+        }
+
+        function formatUrl(url) {
+            if (!url) return 'about:blank';
+            if (/^https?:\/\//i.test(url)) return url;
+            if (url.includes('.') && !url.includes(' ') && /^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(\/.*)?$/.test(url)) return 'https://' + url;
+            return 'https://www.google.com/search?q=' + encodeURIComponent(url);
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        // PAGE LOADER
+        // ════════════════════════════════════════════════════════════════
+        async function loadUrlViaWisp(iframe, targetUrl, tabId) {
+            const formatted = formatUrl(targetUrl);
+            iframe.dataset.url = formatted;
+            updateTabTitle(tabId, formatted);
+            if (formatted === 'about:blank') { iframe.srcdoc = ''; return; }
+            if (!isTransportReady) { iframe.dataset.pendingUrl = formatted; iframe.srcdoc = '<div style="padding:20px;font-family:sans-serif;color:#333;">Initializing transport...</div>'; return; }
+            try {
+                const response = await window.wispFetch(formatted);
+                let html = await response.text();
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(html, 'text/html');
+                const baseUrl = formatted;
+
+                // ═══════════════════════════════════════════════════════════
+                // Add <base href="baseUrl"> — makes relative URLs in HTML
+                // (links, images, scripts) resolve against the real page URL
+                // instead of about:srcdoc
+                // ═══════════════════════════════════════════════════════════
+                const base = doc.createElement('base');
+                base.href = baseUrl;
+                doc.head ? doc.head.prepend(base) : doc.documentElement.prepend(base);
+
+                const meta = doc.createElement('meta');
+                meta.setAttribute('charset', 'utf-8');
+                doc.head.insertBefore(meta, base.nextSibling);
+
+                // Remove CSP, refresh, integrity, crossorigin
+                doc.querySelectorAll('meta[http-equiv="Content-Security-Policy"], meta[http-equiv="refresh"]').forEach(m => m.remove());
+                doc.querySelectorAll('script[integrity], link[integrity]').forEach(el => el.removeAttribute('integrity'));
+                doc.querySelectorAll('[crossorigin]').forEach(el => el.removeAttribute('crossorigin'));
+
+                // Inject interceptor script
+                const script = doc.createElement('script');
+                script.textContent = `(${interceptor.toString()})(${JSON.stringify(baseUrl)}, ${JSON.stringify(tabId)});`;
+                doc.head.insertBefore(script, meta.nextSibling);
+
+                // Rewrite subresource URLs to blob URLs
+                const rewritePromises = [];
+                doc.querySelectorAll('img[src], script[src], link[href], iframe[src], embed[src], source[src]').forEach(el => {
+                    const attr = el.hasAttribute('src') ? 'src' : 'href';
+                    const val = el.getAttribute(attr);
+                    if (!val || val.startsWith('data:') || val.startsWith('blob:') || val.startsWith('javascript:')) return;
+                    let abs; try { abs = new URL(val, baseUrl).href; } catch { return; }
+
+                    if (el.tagName === 'SCRIPT') {
+                        rewritePromises.push(
+                            window.wispFetch(abs, {}, baseUrl).then(res => res.blob()).then(blob => {
+                                el.setAttribute('src', URL.createObjectURL(blob));
+                                el.setAttribute('data-orig-src', abs);
+                            }).catch(err => { console.error(`Script fetch fail: ${abs}`, err); el.remove(); })
+                        );
+                    } else if (el.tagName === 'IFRAME') {
+                        rewritePromises.push(
+                            window.wispFetch(abs, {}, baseUrl).then(async res => {
+                                let nhtml = await res.text();
+                                const np = new DOMParser();
+                                const nd = np.parseFromString(nhtml, 'text/html');
+                                const nbase = nd.createElement('base'); nbase.href = abs;
+                                nd.head ? nd.head.prepend(nbase) : nd.documentElement.prepend(nbase);
+                                const nmeta = nd.createElement('meta'); nmeta.setAttribute('charset','utf-8');
+                                nd.head.insertBefore(nmeta, nbase.nextSibling);
+                                nd.querySelectorAll('meta[http-equiv="refresh"], meta[http-equiv="Content-Security-Policy"]').forEach(m => m.remove());
+                                nd.querySelectorAll('script[integrity], link[integrity]').forEach(e => e.removeAttribute('integrity'));
+                                nd.querySelectorAll('[crossorigin]').forEach(e => e.removeAttribute('crossorigin'));
+                                const ns = nd.createElement('script');
+                                ns.textContent = `(${interceptor.toString()})(${JSON.stringify(abs)}, ${JSON.stringify(tabId)});`;
+                                nd.head.insertBefore(ns, nmeta.nextSibling);
+                                const nrw = [];
+                                nd.querySelectorAll('script[src]').forEach(s => {
+                                    const sv = s.getAttribute('src');
+                                    if (!sv || sv.startsWith('data:') || sv.startsWith('blob:') || sv.startsWith('javascript:')) return;
+                                    let su; try { su = new URL(sv, abs).href; } catch { return; }
+                                    nrw.push(window.wispFetch(su, {}, abs).then(r => r.blob()).then(b => {
+                                        s.setAttribute('src', URL.createObjectURL(b));
+                                        s.setAttribute('data-orig-src', su);
+                                    }).catch(e => { console.error(`Nested script fail: ${su}`, e); s.remove(); }));
+                                });
+                                await Promise.all(nrw);
+                                el.removeAttribute('src');
+                                el.setAttribute('srcdoc', nd.documentElement.outerHTML);
+                            }).catch(err => { console.error(`Iframe fetch fail: ${abs}`, err); })
+                        );
+                    } else {
+                        rewritePromises.push(
+                            window.wispFetch(abs, {}, baseUrl).then(res => res.blob()).then(blob => {
+                                el.setAttribute(attr, URL.createObjectURL(blob));
+                            }).catch(err => { console.error(`Asset fetch fail: ${abs}`, err); })
+                        );
+                    }
+                });
+
+                await Promise.all(rewritePromises);
+
+                iframe.onload = () => {
+                    try {
+                        let loc = iframe.contentWindow.location;
+                        if (loc.href !== 'about:blank' && loc.href !== 'about:srcdoc' && loc.href.startsWith(window.location.origin)) {
+                            let path = loc.pathname + loc.search + loc.hash;
+                            let abs = new URL(path, iframe.dataset.url).href;
+                            loadUrlViaWisp(iframe, abs, tabId);
+                        }
+                    } catch(e) {}
+                };
+
+                iframe.srcdoc = doc.documentElement.outerHTML;
+            } catch (err) {
+                console.error("Fetch Error:", err);
+                iframe.srcdoc = `<div style="color:red;padding:20px;font-family:sans-serif;"><h3>Fetch Error</h3><p>${err.message}</p><pre>${err.stack||''}</pre></div>`;
+            }
+        }
+
+        function createTab(url = 'https://www.google.com/') {
+            tabCount++;
+            const tabId = 'tab-' + tabCount;
+            const tab = document.createElement('div');
+            tab.className = 'tab inactive'; tab.dataset.id = tabId;
+            tab.innerHTML = `<img src="https://placehold.co/16x16" alt="favicon"><span class="label">New Tab</span><span class="tab-close">&#x2715;</span>`;
+            const iframe = document.createElement('iframe');
+            iframe.id = 'iframe-' + tabId;
+            viewport.appendChild(iframe);
+            tabsContainer.insertBefore(tab, addBtn);
+            tab.addEventListener('click', e => { if (!e.target.classList.contains('tab-close')) activateTab(tabId); });
+            tab.querySelector('.tab-close').addEventListener('click', e => { e.stopPropagation(); closeTab(tabId); });
+            activateTab(tabId);
+            loadUrlViaWisp(iframe, url, tabId);
+        }
+
+        function activateTab(tabId) {
+            tabsContainer.querySelectorAll('.tab').forEach(t => { if (t.dataset.id === tabId) { t.classList.remove('inactive'); t.classList.add('active'); } else { t.classList.remove('active'); t.classList.add('inactive'); } });
+            viewport.querySelectorAll('iframe').forEach(f => { if (f.id === 'iframe-' + tabId) { f.classList.add('active'); searchBar.value = f.dataset.url || ''; } else f.classList.remove('active'); });
+            activeTabId = tabId;
+        }
+
+        function closeTab(tabId) {
+            const tab = tabsContainer.querySelector(`[data-id="${tabId}"]`);
+            const iframe = document.getElementById('iframe-' + tabId);
+            if (!tab) return;
+            const wasActive = tab.classList.contains('active');
+            const next = tab.nextElementSibling?.classList.contains('tab') ? tab.nextElementSibling : tab.previousElementSibling?.classList.contains('tab') ? tab.previousElementSibling : null;
+            tab.remove(); if (iframe) iframe.remove();
+            if (wasActive && next) activateTab(next.dataset.id);
+            else if (!tabsContainer.querySelector('.tab')) { searchBar.value = ''; activeTabId = null; createTab(); }
+        }
+
+        function updateTabTitle(tabId, url) {
+            const tab = tabsContainer.querySelector(`[data-id="${tabId}"]`);
+            if (tab) { try { tab.querySelector('.label').textContent = new URL(url).hostname || url; } catch { tab.querySelector('.label').textContent = url; } }
+        }
+
+        addBtn.addEventListener('click', () => createTab('https://www.google.com/'));
+        searchBar.addEventListener('keydown', e => { if (e.key === 'Enter' && activeTabId) { const f = document.getElementById('iframe-' + activeTabId); if (f) loadUrlViaWisp(f, searchBar.value, activeTabId); } });
+        document.addEventListener('keydown', e => { if ((e.ctrlKey || e.metaKey) && e.key === ',') { e.preventDefault(); openSettings(); } if (e.key === 'Escape' && settingsModal.classList.contains('open')) closeSettings(); });
+
+        initAndSetup();
+        createTab('https://www.google.com/search?q=test');
+    </script>
+</body>
+</html>

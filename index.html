@@ -1,0 +1,1695 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Quest</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+      user-select: none;
+      -webkit-user-select: none;
+      touch-action: none;
+      overflow: hidden;
+    }
+    body, html {
+      width: 100%;
+      height: 100%;
+      background-color: #c4abb0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+    }
+    #ui {
+      position: absolute;
+      top: 6px;
+      left: 6px;
+      z-index: 10;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      background: none;
+      padding: 0;
+      border: none;
+      color: #fff;
+    }
+    button, select, label {
+      font-size: 11px;
+      padding: 2px 6px;
+      border: none;
+      border-radius: 0px;
+      cursor: pointer;
+      background: rgba(0, 0, 0, 0.4);
+      color: #fff;
+      outline: none;
+    }
+    button:hover {
+      background: rgba(0, 0, 0, 0.6);
+    }
+    button.active {
+      background: rgba(57, 173, 88, 0.8);
+    }
+    #addBtn.active {
+      background: rgba(43, 123, 185, 0.8);
+    }
+    #fileInput {
+      display: none;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="ui">
+    <button id="modeBtn" tabindex="-1">Switch to Editor Mode</button>
+    <div id="editorControls" style="display: none; gap: 4px; align-items: center;">
+      <button id="addBtn" tabindex="-1">+ Add Block</button>
+      <label>Type:
+        <select id="rectType" tabindex="-1">
+          <option value="grass">Grass</option>
+          <option value="platform">Platform</option>
+          <option value="obstacle">Obstacle</option>
+        </select>
+      </label>
+      <button id="saveLocalBtn" tabindex="-1">Save Local</button>
+      <button id="loadLocalBtn" tabindex="-1">Load Local</button>
+      <button id="exportBtn" tabindex="-1">Export JSON</button>
+      <button id="importBtn" tabindex="-1">Import JSON</button>
+      <button id="clearBtn" tabindex="-1">Clear All</button>
+      <input type="file" id="fileInput" accept=".json" tabindex="-1">
+    </div>
+  </div>
+
+  <canvas id="gameCanvas"></canvas>
+
+  <script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+
+    const PALETTE = {
+        sky: '#6487d9',
+        ground: '#39ad58',
+        dirt: '#523a28',
+        block: '#8a2b2b',
+        platform: '#723838',
+        platformShadow: 'rgba(0, 0, 0, 0.2)',
+        bolt: '#4a4a4a',
+        player: '#ffffff'
+    };
+
+    const CAMERA_ZOOM = 1.5;
+    const NODE_SPACING = 24;
+    const GRID_SIZE = 24;
+
+    let isEditor = false;
+    let isPlacementMode = false;
+    let width = window.innerWidth;
+    let height = window.innerHeight;
+    
+    let groundY = Math.floor(((height / CAMERA_ZOOM) * 0.75) / GRID_SIZE) * GRID_SIZE;
+
+    let cameraX = 0;
+    let editorCamX = 0;
+    let editorCamY = 0;
+    let editorZoom = 1.0;
+
+    function getDefaultRectangles() {
+      return [
+        { x: -504, y: groundY, w: 2016, h: 408, type: 'grass' },
+        { x: 288, y: groundY - 144, w: 192, h: 48, type: 'platform' },
+        { x: 648, y: groundY - 72, w: 72, h: 72, type: 'obstacle' }
+      ];
+    }
+
+    let rectangles = [];
+
+    function loadDefaultLevel() {
+      const savedLevel = localStorage.getItem('custom_runner_level');
+      if (savedLevel) {
+        try {
+          rectangles = JSON.parse(savedLevel);
+        } catch (err) {
+          rectangles = getDefaultRectangles();
+        }
+      } else {
+        rectangles = getDefaultRectangles();
+      }
+    }
+
+    let grassBladesMap = new Map();
+    let grassBottomNodes = [];
+    let minNodeIdx = Infinity;
+    let maxNodeIdx = -Infinity;
+    let time = 0;
+
+    let audioCtx = null;
+    function initAudio() {
+      if (!audioCtx) {
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        if (AudioContext) audioCtx = new AudioContext();
+      }
+      if (audioCtx && audioCtx.state === 'suspended') {
+        audioCtx.resume();
+      }
+    }
+
+    function playJumpSound() {
+      if (!audioCtx) return;
+      try {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(140, audioCtx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(320, audioCtx.currentTime + 0.12);
+        gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.12);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.12);
+      } catch (e) {}
+    }
+
+    function playCrashSound() {
+      if (!audioCtx) return;
+      try {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(110, audioCtx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(25, audioCtx.currentTime + 0.2);
+        gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.2);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.2);
+      } catch (e) {}
+    }
+
+    const player = {
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      maxSpeed: 4.2,
+      accel: 0.24,
+      decel: 0.18,
+      gravity: 0.15,
+      jumpForce: -6.2,
+      isGrounded: false,
+      animPhase: 0,
+      isAlive: true,
+      facing: 1,
+      leg1: { x: 0, y: 0 },
+      leg2: { x: 0, y: 0 },
+      isCrouching: false,
+      crouchFactor: 0 // 0 = standing, 1 = fully crouched
+    };
+
+    let particles = [];
+    let distanceMetres = 0;
+    const keys = { left: false, right: false, jump: false, shift: false, crouch: false };
+
+    function resize() {
+      const dpr = window.devicePixelRatio || 1;
+      width = window.innerWidth;
+      height = window.innerHeight;
+      canvas.width = width * dpr;
+      canvas.height = height * dpr;
+      ctx.scale(dpr, dpr);
+      groundY = Math.floor(((height / CAMERA_ZOOM) * 0.75) / GRID_SIZE) * GRID_SIZE;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    function getPolyDepth(nodeIdx) {
+      const hash = Math.sin(nodeIdx * 12.9898 + 78.233) * 43758.5453;
+      const pseudoRand = hash - Math.floor(hash);
+      return 18 + Math.floor(pseudoRand * 4) * 8;
+    }
+
+    function getBladeProps(nodeIdx, edgeDist = 0) {
+      const hash = Math.sin(nodeIdx * 39.346 + 11.233) * 23421.631;
+      const r1 = hash - Math.floor(hash);
+      const r2 = (hash * 10) - Math.floor(hash * 10);
+      const r3 = (hash * 100) - Math.floor(hash * 100);
+      
+      // Increase blade density near edges
+      let edgeFactor = 1.0;
+      if (edgeDist < 48) {
+        edgeFactor = 1.0 + (48 - edgeDist) / 48 * 0.5;
+      }
+      
+      return {
+        offX: (r1 - 0.5) * 6,
+        width: (16 + r2 * 10) * edgeFactor,
+        height: (32 + r3 * 24) * edgeFactor,
+        lean: (r1 - 0.5) * 8
+      };
+    }
+
+    function getGrassAt(x) {
+      let highestGrass = null;
+      for (let r of rectangles) {
+        if (r.type === 'grass' && x >= r.x && x <= r.x + r.w) {
+          if (!highestGrass || r.y < highestGrass.y) {
+            highestGrass = r;
+          }
+        }
+      }
+      return highestGrass;
+    }
+
+    function isSurfaceOccluded(x, y, excludeRect = null) {
+      for (let r of rectangles) {
+        if (r === excludeRect) continue;
+        if (x >= r.x && x <= r.x + r.w) {
+          if (r.y < y && r.y + r.h >= y - 1) {
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+
+    function hasGrassAbove(rect) {
+      for (let r of rectangles) {
+        if (r === rect) continue;
+        if (r.type !== 'grass') continue;
+        
+        // Simple check: is there any grass block above this one?
+        if (r.y < rect.y && r.y + r.h >= rect.y) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    function isGrassPolyOccluded(x, y, depth, excludeRect = null) {
+      for (let r of rectangles) {
+        if (r === excludeRect) continue;
+        if (r.type !== 'grass') continue;
+        if (x >= r.x && x <= r.x + r.w) {
+          // Check if this grass rectangle would occlude the polygon below
+          // The polygon extends from y down to y + depth
+          // If another grass layer is above this polygon's top, it occludes it
+          if (r.y < y && r.y + r.h >= y) {
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+
+    function updateGrassSystem(activeCamX) {
+      time += 0.03;
+      const effectiveZoom = isEditor ? editorZoom : CAMERA_ZOOM;
+      const viewWidth = width / effectiveZoom;
+      const curCamX = activeCamX !== undefined ? activeCamX : cameraX;
+
+      const leftBound = curCamX - 1000;
+      const rightBound = curCamX + viewWidth + 1000;
+
+      const minNeededIdx = Math.floor(leftBound / NODE_SPACING);
+      const maxNeededIdx = Math.ceil(rightBound / NODE_SPACING);
+
+      const GRASS_EDGE_PADDING = 4; // Keep grass blades away from edges
+
+      grassBladesMap.clear();
+      grassBottomNodes = [];
+
+      for (let idx = minNeededIdx; idx <= maxNeededIdx; idx++) {
+        const x = idx * NODE_SPACING;
+        for (let r of rectangles) {
+          if (r.type === 'grass' && x >= r.x + GRASS_EDGE_PADDING && x <= r.x + r.w - GRASS_EDGE_PADDING) {
+            if (!isSurfaceOccluded(x, r.y)) {
+              grassBottomNodes.push({ idx: idx, x: x, y: r.y, depth: getPolyDepth(idx) });
+              
+              // Calculate distance from nearest edge for blade sizing
+              const distFromLeft = x - (r.x + GRASS_EDGE_PADDING);
+              const distFromRight = (r.x + r.w - GRASS_EDGE_PADDING) - x;
+              const edgeDist = Math.min(distFromLeft, distFromRight);
+              
+              const props = getBladeProps(idx, edgeDist);
+              const bladeX = x + props.offX;
+              if (!isSurfaceOccluded(bladeX, r.y)) {
+                grassBladesMap.set(`${idx}_${r.y}`, {
+                  idx: idx,
+                  x: bladeX,
+                  y: r.y,
+                  width: props.width,
+                  height: props.height,
+                  lean: props.lean,
+                  deflection: 0
+                });
+              }
+            }
+          }
+        }
+      }
+
+      for (let blade of grassBladesMap.values()) {
+        const dx = blade.x - player.x;
+        const distY = Math.abs(player.y - blade.y);
+
+        if (!isEditor && Math.abs(dx) < 50 && distY < 30) {
+          const pushDir = dx > 0 ? 1 : -1;
+          const pushForce = (1 - Math.abs(dx) / 50) * 25 * pushDir;
+
+          if (Math.abs(player.vx) > 0.1) {
+            blade.deflection += (player.vx * 4 - blade.deflection) * 0.35;
+          } else {
+            blade.deflection += (pushForce - blade.deflection) * 0.35;
+          }
+        }
+        blade.deflection += (0 - blade.deflection) * 0.08;
+      }
+    }
+
+    function drawTerrain(camX, camY = 0) {
+      const maxConnectDist = 6 * GRID_SIZE;
+
+      ctx.fillStyle = PALETTE.dirt;
+      for (let r of rectangles) {
+        if (r.type === 'grass') {
+          ctx.fillRect(r.x - camX, r.y - camY, r.w, r.h);
+        }
+      }
+
+      ctx.fillStyle = PALETTE.ground;
+      for (let r of rectangles) {
+        if (r.type !== 'grass') continue;
+        if (isSurfaceOccluded(r.x + r.w / 2, r.y, r)) continue;
+
+        const nodesInRect = grassBottomNodes.filter(n => n.x >= r.x && n.x <= r.x + r.w && n.y === r.y);
+
+        let maxDepth = 0;
+        if (nodesInRect.length > 0) {
+          for (let n of nodesInRect) {
+            maxDepth = Math.max(maxDepth, n.depth);
+          }
+        } else {
+          const midIdx = Math.floor((r.x + r.w / 2) / NODE_SPACING);
+          maxDepth = getPolyDepth(midIdx);
+        }
+
+        if (isGrassPolyOccluded(r.x + r.w / 2, r.y, maxDepth, r)) continue;
+
+        const coveredRanges = [];
+        for (let other of rectangles) {
+          if (other === r) continue;
+          if (other.type !== 'grass') continue;
+          if (other.y < r.y && other.y + other.h >= r.y) {
+            const overlapStart = Math.max(r.x, other.x);
+            const overlapEnd = Math.min(r.x + r.w, other.x + other.w);
+            if (overlapStart < overlapEnd) {
+              coveredRanges.push({ start: overlapStart, end: overlapEnd });
+            }
+          }
+        }
+
+        coveredRanges.sort((a, b) => a.start - b.start);
+        const mergedRanges = [];
+        for (const range of coveredRanges) {
+          if (mergedRanges.length === 0 || range.start > mergedRanges[mergedRanges.length - 1].end) {
+            mergedRanges.push({ ...range });
+          } else {
+            mergedRanges[mergedRanges.length - 1].end = Math.max(mergedRanges[mergedRanges.length - 1].end, range.end);
+          }
+        }
+
+        const uncoveredSections = [];
+        let currentX = r.x;
+        for (const range of mergedRanges) {
+          if (currentX < range.start) {
+            uncoveredSections.push({ start: currentX, end: range.start });
+          }
+          currentX = Math.max(currentX, range.end);
+        }
+        if (currentX < r.x + r.w) {
+          uncoveredSections.push({ start: currentX, end: r.x + r.w });
+        }
+
+        for (const section of uncoveredSections) {
+          const sectionNodes = nodesInRect
+            .filter(n => n.x >= section.start && n.x <= section.end)
+            .sort((a, b) => a.x - b.x);
+
+          ctx.beginPath();
+          ctx.moveTo(section.start - camX, r.y - camY);
+
+          let firstDepth = sectionNodes.length > 0 ? sectionNodes[0].depth : getPolyDepth(Math.floor(section.start / NODE_SPACING));
+          let lastDepth = sectionNodes.length > 0 ? sectionNodes[sectionNodes.length - 1].depth : firstDepth;
+
+          ctx.lineTo(section.start - camX, r.y + firstDepth - camY);
+
+          for (let n of sectionNodes) {
+            ctx.lineTo(n.x - camX, r.y + n.depth - camY);
+          }
+
+          ctx.lineTo(section.end - camX, r.y + lastDepth - camY);
+          ctx.lineTo(section.end - camX, r.y - camY);
+          ctx.closePath();
+          ctx.fill();
+        }
+      }
+    }
+
+    function drawGrass(camX, camY = 0) {
+      const windForce = Math.sin(time) * 4 + Math.cos(time * 0.6) * 2;
+      ctx.fillStyle = PALETTE.ground;
+
+      for (let blade of grassBladesMap.values()) {
+        const screenX = blade.x - camX;
+
+        const halfWidth = blade.width / 2;
+        const baseLeftX = screenX - halfWidth;
+        const baseRightX = screenX + halfWidth;
+
+        const tipX = screenX + blade.lean + windForce + blade.deflection;
+        const tipY = (blade.y - blade.height) - camY;
+        const renderBaseY = (blade.y + 1.5) - camY;
+
+        ctx.beginPath();
+        ctx.moveTo(baseLeftX, renderBaseY);
+        ctx.quadraticCurveTo(screenX - halfWidth * 0.5, (blade.y - blade.height * 0.5) - camY, tipX, tipY);
+        ctx.quadraticCurveTo(screenX + halfWidth * 0.5, (blade.y - blade.height * 0.5) - camY, baseRightX, renderBaseY);
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
+
+    function drawHexagon(cx, cy, radius) {
+      ctx.beginPath();
+      for (let i = 0; i < 6; i++) {
+        const angle = (Math.PI / 3) * i;
+        const hx = cx + radius * Math.cos(angle);
+        const hy = cy + radius * Math.sin(angle);
+        if (i === 0) ctx.moveTo(hx, hy);
+        else ctx.lineTo(hx, hy);
+      }
+      ctx.closePath();
+      ctx.fill();
+    }
+
+function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
+      const dx = targetX - hipX;
+      const dy = targetY - hipY;
+      let dist = Math.sqrt(dx * dx + dy * dy);
+
+      const maxDist = thighLen + shinLen - 0.01;
+      const minDist = Math.abs(thighLen - shinLen) + 0.01;
+      dist = Math.max(minDist, Math.min(maxDist, dist));
+
+      const angleToTarget = Math.atan2(dx, dy);
+      const cosAlpha = (thighLen * thighLen + dist * dist - shinLen * shinLen) / (2 * thighLen * dist);
+      const alpha = Math.acos(Math.max(-1, Math.min(1, cosAlpha)));
+
+      const thighAngle = angleToTarget + direction * alpha;
+
+      const kneeX = hipX + thighLen * Math.sin(thighAngle);
+      const kneeY = hipY + thighLen * Math.cos(thighAngle);
+
+      const shinAngle = Math.atan2(targetX - kneeX, targetY - kneeY);
+      const tipX = kneeX + shinLen * Math.sin(shinAngle);
+      const tipY = kneeY + shinLen * Math.cos(shinAngle);
+
+      return { kneeX, kneeY, tipX, tipY };
+    }
+
+    function drawPlayer(p, camX, camY = 0) {
+      const screenX = p.x - camX;
+      
+      const headRadius = 15;
+      const legWidth = 12;
+      const thighLen = 22;
+      const shinLen = 22;
+      const headGap = 10;
+
+      const innerKneeAngleRad = (125 * Math.PI) / 180;
+      const standingLegHeight = 2 * thighLen * Math.sin(innerKneeAngleRad / 2);
+      const crouchLegHeight = standingLegHeight * 0.5; // 50% shorter when crouching
+      const currentLegHeight = standingLegHeight - p.crouchFactor * (standingLegHeight - crouchLegHeight);
+      
+      const hipX = screenX;
+      const hipY = (p.y - currentLegHeight - legWidth / 2) - camY;
+
+      const headX = hipX;
+      const headY = hipY - headRadius - headGap;
+
+      const dir = p.facing || 1;
+      const groundContactY = (p.y - legWidth / 2) - camY;
+
+      const jumpKneeAngleRad = (170 * Math.PI) / 180;
+      const jumpLegHeight = 2 * thighLen * Math.sin(jumpKneeAngleRad / 2);
+
+      let target1X, target1Y, target2X, target2Y;
+
+      if (p.isGrounded) {
+        if (Math.abs(p.vx) > 0.05) {
+          const stepLength = 32;
+          const stride1 = -Math.cos(p.animPhase);
+          const stride2 = -Math.cos(p.animPhase + Math.PI);
+
+          // Reduce step length and lift when crouching
+          const crouchStepFactor = 1 - p.crouchFactor * 0.5;
+          const lift1 = Math.max(0, Math.sin(p.animPhase)) * 15 * crouchStepFactor;
+          const lift2 = Math.max(0, Math.sin(p.animPhase + Math.PI)) * 15 * crouchStepFactor;
+
+          target1X = hipX + stride1 * stepLength * crouchStepFactor * dir;
+          target1Y = groundContactY - lift1;
+
+          target2X = hipX + stride2 * stepLength * crouchStepFactor * dir;
+          target2Y = groundContactY - lift2;
+        } else {
+          target1X = hipX;
+          target1Y = groundContactY;
+          target2X = hipX;
+          target2Y = groundContactY;
+        }
+      } else {
+        const isMovingHorizontally = keys.left || keys.right || Math.abs(p.vx) > 0.1;
+        const jumpProgress = Math.min(1, Math.max(0, 1 - Math.abs(p.vy) / 6));
+
+        if (isMovingHorizontally) {
+          const spread = 22 * dir;
+          target1X = hipX + spread;
+          target1Y = hipY + jumpLegHeight;
+          target2X = hipX - spread;
+          target2Y = hipY + jumpLegHeight;
+        } else {
+          const targetLegHeight = currentLegHeight + (jumpLegHeight - currentLegHeight) * (1 - jumpProgress * 0.5);
+          target1X = hipX;
+          target1Y = hipY + targetLegHeight;
+          target2X = hipX;
+          target2Y = hipY + targetLegHeight;
+        }
+      }
+
+      p.leg1.x += (target1X - p.leg1.x) * 0.35;
+      p.leg1.y += (target1Y - p.leg1.y) * 0.35;
+      p.leg2.x += (target2X - p.leg2.x) * 0.35;
+      p.leg2.y += (target2Y - p.leg2.y) * 0.35;
+
+      ctx.save();
+      ctx.globalAlpha = 0.50;
+
+      ctx.fillStyle = PALETTE.player;
+      ctx.beginPath();
+      ctx.arc(headX, headY, headRadius, 0, Math.PI * 2);
+      ctx.fill();
+
+      const ik1 = solveIK(hipX, hipY, p.leg1.x, p.leg1.y, thighLen, shinLen, dir);
+      const ik2 = solveIK(hipX, hipY, p.leg2.x, p.leg2.y, thighLen, shinLen, dir);
+
+      ctx.strokeStyle = PALETTE.player;
+      ctx.lineWidth = legWidth;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+
+      ctx.beginPath();
+      ctx.moveTo(hipX, hipY);
+      ctx.lineTo(ik1.kneeX, ik1.kneeY);
+      ctx.lineTo(ik1.tipX, ik1.tipY);
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(hipX, hipY);
+      ctx.lineTo(ik2.kneeX, ik2.kneeY);
+      ctx.lineTo(ik2.tipX, ik2.tipY);
+      ctx.stroke();
+
+      ctx.restore();
+    }
+
+    function createExplosion(x, y) {
+      for (let i = 0; i < 28; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = 2 + Math.random() * 6;
+        particles.push({
+          x: x,
+          y: y,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed - 1,
+          size: 4 + Math.random() * 8,
+          alpha: 1,
+          life: 0.02 + Math.random() * 0.03
+        });
+      }
+    }
+
+    function update() {
+      if (isEditor) {
+        const activeCamX = editorCamX - (width / editorZoom) * 0.5;
+        updateGrassSystem(activeCamX);
+        return;
+      }
+
+      if (!player.isAlive) {
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const pt = particles[i];
+          pt.x += pt.vx;
+          pt.y += pt.vy;
+          pt.vy += 0.15;
+          pt.alpha -= pt.life;
+          if (pt.alpha <= 0) particles.splice(i, 1);
+        }
+        return;
+      }
+
+      // Handle smooth crouching
+      const targetCrouch = keys.crouch && player.isGrounded ? 1 : 0;
+      player.crouchFactor += (targetCrouch - player.crouchFactor) * 0.2;
+      player.isCrouching = player.crouchFactor > 0.5;
+      
+      const speedMultiplier = 1 - player.crouchFactor * 0.4; // 1.0 when standing, 0.6 when crouching
+
+      if (keys.left) {
+        player.vx -= player.accel * speedMultiplier;
+        if (player.vx < -player.maxSpeed * speedMultiplier) player.vx = -player.maxSpeed * speedMultiplier;
+        player.facing = -1;
+      } else if (keys.right) {
+        player.vx += player.accel * speedMultiplier;
+        if (player.vx > player.maxSpeed * speedMultiplier) player.vx = player.maxSpeed * speedMultiplier;
+        player.facing = 1;
+      } else {
+        if (player.vx > 0) {
+          player.vx = Math.max(0, player.vx - player.decel);
+        } else if (player.vx < 0) {
+          player.vx = Math.min(0, player.vx + player.decel);
+        }
+      }
+
+      if (keys.jump && player.isGrounded && player.crouchFactor < 0.5) {
+        player.vy = player.jumpForce;
+        player.isGrounded = false;
+        playJumpSound();
+      }
+
+      if (!keys.jump && player.vy < -1.8) {
+        player.vy *= 0.82;
+      }
+
+      player.vy += player.gravity;
+
+      const headRadius = 15;
+      const totalHeight = 54 - player.crouchFactor * 27; // Smoothly interpolate height
+      const getPlayerBox = (px, py) => ({
+        left: px - headRadius,
+        right: px + headRadius,
+        top: py - totalHeight - headRadius * 2,
+        bottom: py
+      });
+
+      player.x += player.vx;
+      let box = getPlayerBox(player.x, player.y);
+
+      for (let rect of rectangles) {
+        if (rect.type === 'obstacle') {
+          if (box.right > rect.x && box.left < rect.x + rect.w && box.bottom > rect.y && box.top < rect.y + rect.h) {
+            player.isAlive = false;
+            playCrashSound();
+            createExplosion(player.x, player.y - 20);
+            return;
+          }
+        } else if (rect.type === 'platform' || rect.type === 'grass') {
+          if (box.bottom > rect.y + 2 && box.top < rect.y + rect.h - 2) {
+            if (player.vx > 0 && box.right > rect.x && box.left < rect.x) {
+              player.x = rect.x - headRadius;
+              player.vx = 0;
+            } else if (player.vx < 0 && box.left < rect.x + rect.w && box.right > rect.x + rect.w) {
+              player.x = rect.x + rect.w + headRadius;
+              player.vx = 0;
+            }
+          }
+        }
+      }
+
+      player.y += player.vy;
+      box = getPlayerBox(player.x, player.y);
+      let groundedThisFrame = false;
+
+      for (let rect of rectangles) {
+        if (rect.type === 'obstacle') {
+          if (box.right > rect.x && box.left < rect.x + rect.w && box.bottom > rect.y && box.top < rect.y + rect.h) {
+            player.isAlive = false;
+            playCrashSound();
+            createExplosion(player.x, player.y - 20);
+            return;
+          }
+        } else if (rect.type === 'platform' || rect.type === 'grass') {
+          if (box.right > rect.x + 2 && box.left < rect.x + rect.w - 2) {
+            if (player.vy >= 0 && box.bottom >= rect.y && box.bottom - player.vy <= rect.y + 12) {
+              player.y = rect.y;
+              player.vy = 0;
+              groundedThisFrame = true;
+            } else if (player.vy < 0 && box.top <= rect.y + rect.h && box.top - player.vy >= rect.y + rect.h - 12) {
+              player.y = rect.y + rect.h + totalHeight + headRadius * 2;
+              player.vy = 0;
+            }
+          }
+        }
+      }
+
+      player.isGrounded = groundedThisFrame;
+
+      if (player.isGrounded && Math.abs(player.vx) > 0.1) {
+        player.animPhase += Math.abs(player.vx) * 0.08;
+      } else if (player.isGrounded) {
+        player.animPhase = player.animPhase % (Math.PI * 2);
+        if (player.animPhase > 0) {
+          player.animPhase = Math.max(0, player.animPhase - 0.2);
+        }
+      }
+
+      const viewHeight = height / CAMERA_ZOOM;
+      if (player.y > viewHeight + 300) {
+        player.isAlive = false;
+        playCrashSound();
+        createExplosion(player.x, player.y - 50);
+      }
+
+      const targetCamX = player.x - (width / CAMERA_ZOOM) * 0.5;
+      cameraX += (targetCamX - cameraX) * 0.08;
+
+      updateGrassSystem(cameraX);
+      distanceMetres = Math.floor(player.x / 100);
+    }
+
+    function renderWorldObjects(camX, camY = 0) {
+      drawTerrain(camX, camY);
+      drawGrass(camX, camY);
+
+      ctx.fillStyle = PALETTE.platformShadow;
+      for (let r of rectangles) {
+        if (r.type === 'platform') {
+          const screenX = r.x - camX;
+          const shadowTop = (r.y + r.h) - camY;
+          ctx.fillRect(screenX, shadowTop, r.w, 400);
+        }
+      }
+
+      ctx.fillStyle = PALETTE.block;
+      for (let r of rectangles) {
+        if (r.type === 'obstacle') {
+          ctx.fillRect(r.x - camX, r.y - camY, r.w, r.h);
+        }
+      }
+
+      for (let r of rectangles) {
+        if (r.type === 'platform') {
+          const screenX = r.x - camX;
+          ctx.fillStyle = PALETTE.platform;
+          ctx.fillRect(screenX, r.y - camY, r.w, r.h);
+
+          const boltInset = 7;
+          const boltRadius = 3.5;
+          ctx.fillStyle = PALETTE.bolt;
+          if (r.w > boltInset * 2 && r.h > boltInset * 2) {
+            drawHexagon(screenX + boltInset, (r.y + boltInset) - camY, boltRadius);
+            drawHexagon(screenX + r.w - boltInset, (r.y + boltInset) - camY, boltRadius);
+            drawHexagon(screenX + boltInset, (r.y + r.h - boltInset) - camY, boltRadius);
+            drawHexagon(screenX + r.w - boltInset, (r.y + r.h - boltInset) - camY, boltRadius);
+          }
+        }
+      }
+
+      for (let pt of particles) {
+        ctx.save();
+        ctx.globalAlpha = Math.max(0, pt.alpha);
+        ctx.fillStyle = PALETTE.player;
+        ctx.fillRect(pt.x - camX, pt.y - camY, pt.size, pt.size);
+        ctx.restore();
+      }
+
+      if (player.isAlive) {
+        drawPlayer(player, camX, camY);
+      }
+    }
+
+    function renderGame() {
+      ctx.save();
+      ctx.scale(CAMERA_ZOOM, CAMERA_ZOOM);
+
+      renderWorldObjects(cameraX, 0);
+
+      ctx.restore();
+
+      ctx.fillStyle = PALETTE.player;
+      ctx.font = '400 20px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillText(`Quest 1.0`, 16, 36);
+
+      ctx.textAlign = 'center';
+      ctx.font = '700 64px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+      ctx.fillText(`${distanceMetres} m`, width / 2, 64);
+
+      if (!player.isAlive) {
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.25)';
+        ctx.fillRect(0, 0, width, height);
+
+        ctx.fillStyle = PALETTE.player;
+        ctx.font = '700 42px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('Died!', width / 2, height / 2 - 20);
+
+        ctx.font = '400 20px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+        ctx.fillText('Jump to restart...', width / 2, height / 2 + 20);
+        ctx.restore();
+      }
+    }
+
+    function worldToScreenEditor(wx, wy) {
+      return {
+        x: (wx - editorCamX) * editorZoom + width / 2,
+        y: (wy - editorCamY) * editorZoom + height / 2
+      };
+    }
+
+    function screenToWorldEditor(sx, sy) {
+      return {
+        x: (sx - width / 2) / editorZoom + editorCamX,
+        y: (sy - height / 2) / editorZoom + editorCamY
+      };
+    }
+
+    function drawGrid() {
+      const startWorld = screenToWorldEditor(0, 0);
+      const endWorld = screenToWorldEditor(width, height);
+
+      const startX = Math.floor(startWorld.x / GRID_SIZE) * GRID_SIZE;
+      const endX = Math.ceil(endWorld.x / GRID_SIZE) * GRID_SIZE;
+      const startY = Math.floor(startWorld.y / GRID_SIZE) * GRID_SIZE;
+      const endY = Math.ceil(endWorld.y / GRID_SIZE) * GRID_SIZE;
+
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+      ctx.lineWidth = 1;
+
+      for (let x = startX; x <= endX; x += GRID_SIZE) {
+        const screenX = (x - editorCamX) * editorZoom + width / 2;
+        ctx.beginPath();
+        ctx.moveTo(screenX, 0);
+        ctx.lineTo(screenX, height);
+        ctx.stroke();
+      }
+
+      for (let y = startY; y <= endY; y += GRID_SIZE) {
+        const screenY = (y - editorCamY) * editorZoom + height / 2;
+        ctx.beginPath();
+        ctx.moveTo(0, screenY);
+        ctx.lineTo(width, screenY);
+        ctx.stroke();
+      }
+
+      ctx.restore();
+    }
+
+    function renderEditor() {
+      drawGrid();
+
+      ctx.save();
+      ctx.translate(width / 2, height / 2);
+      ctx.scale(editorZoom, editorZoom);
+
+      const activeCamX = editorCamX;
+      const activeCamY = editorCamY;
+
+      renderWorldObjects(activeCamX, activeCamY);
+
+      for (let r of rectangles) {
+        const rx = r.x - activeCamX;
+        const ry = r.y - activeCamY;
+
+        const isSelected = selectedRects.includes(r);
+        ctx.strokeStyle = isSelected ? '#ffffff' : 'rgba(0,0,0,0.3)';
+        ctx.lineWidth = (isSelected ? 2 : 1) / editorZoom;
+        ctx.strokeRect(rx, ry, r.w, r.h);
+
+        if (isSelected) {
+          ctx.fillStyle = '#ffffff';
+          const hs = 8 / editorZoom;
+          ctx.fillRect(rx - hs / 2, ry - hs / 2, hs, hs);
+          ctx.fillRect(rx + r.w - hs / 2, ry - hs / 2, hs, hs);
+          ctx.fillRect(rx - hs / 2, ry + r.h - hs / 2, hs, hs);
+          ctx.fillRect(rx + r.w - hs / 2, ry + r.h - hs / 2, hs, hs);
+        }
+      }
+
+      // Draw selection box
+      if (isSelecting) {
+        const screenStart = worldToScreenEditor(selectionStart.x, selectionStart.y);
+        const currentMouse = screenToWorldEditor(lastMouseX, lastMouseY);
+        
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1 / editorZoom;
+        ctx.setLineDash([5 / editorZoom, 5 / editorZoom]);
+        ctx.strokeRect(selectionStart.x - activeCamX, selectionStart.y - activeCamY, 
+                       currentMouse.x - selectionStart.x, currentMouse.y - selectionStart.y);
+        ctx.setLineDash([]);
+      }
+
+      ctx.restore();
+    }
+
+    function render() {
+      ctx.fillStyle = PALETTE.sky;
+      ctx.fillRect(0, 0, width, height);
+
+      if (isEditor) {
+        renderEditor();
+      } else {
+        renderGame();
+      }
+    }
+
+    function gameLoop() {
+      update();
+      render();
+      requestAnimationFrame(gameLoop);
+    }
+
+    function restartGame() {
+      player.x = 0;
+      player.y = groundY;
+      player.vx = 0;
+      player.vy = 0;
+      player.isGrounded = true;
+      player.isAlive = true;
+      player.facing = 1;
+      player.animPhase = 0;
+      player.isCrouching = false;
+      player.crouchFactor = 0;
+      player.leg1 = { x: 0, y: groundY };
+      player.leg2 = { x: 0, y: groundY };
+      particles = [];
+      grassBladesMap.clear();
+      grassBottomNodes = [];
+      minNodeIdx = Infinity;
+      maxNodeIdx = -Infinity;
+      cameraX = player.x - (width / CAMERA_ZOOM) * 0.5;
+      distanceMetres = 0;
+
+      updateGrassSystem(cameraX);
+    }
+
+    let selectedRect = null;
+    let selectedRects = []; // For multi-selection
+    let isDragging = false;
+    let resizeHandle = null;
+    let isPanning = false;
+    let dragOffset = { x: 0, y: 0 };
+    let panStart = { x: 0, y: 0 };
+    let resizeInitial = { x: 0, y: 0, w: 0, h: 0 };
+    let clipboard = null; // For copy/paste
+    let isSelecting = false; // For box selection
+    let selectionStart = { x: 0, y: 0 };
+    let lastMouseX = 0;
+    let lastMouseY = 0;
+    let undoStack = [];
+    let redoStack = [];
+    let dragStartPositions = []; // Store initial positions for group drag
+    let touchStartDist = 0; // For pinch zoom
+    let touchStartZoom = 0;
+
+    const modeBtn = document.getElementById('modeBtn');
+    const addBtn = document.getElementById('addBtn');
+    const editorControls = document.getElementById('editorControls');
+    const rectTypeSelect = document.getElementById('rectType');
+
+    document.querySelectorAll('#ui button, #ui select, #ui input').forEach(el => {
+      el.addEventListener('focus', () => el.blur());
+    });
+
+    function setPlacementMode(active) {
+      isPlacementMode = active;
+      if (isPlacementMode) {
+        addBtn.classList.add('active');
+        selectedRects = [];
+        selectedRect = null;
+      } else {
+        addBtn.classList.remove('active');
+      }
+    }
+
+    modeBtn.addEventListener('click', (e) => {
+      e.target.blur();
+      isEditor = !isEditor;
+      setPlacementMode(false);
+      if (isEditor) {
+        modeBtn.textContent = 'Switch to Play Mode';
+        modeBtn.classList.add('active');
+        editorControls.style.display = 'flex';
+        editorCamX = player.x;
+        editorCamY = groundY - (height / CAMERA_ZOOM) * 0.25;
+        editorZoom = CAMERA_ZOOM;
+        selectedRects = [];
+        selectedRect = null;
+      } else {
+        modeBtn.textContent = 'Switch to Editor Mode';
+        modeBtn.classList.remove('active');
+        editorControls.style.display = 'none';
+        restartGame();
+      }
+    });
+
+    addBtn.addEventListener('click', (e) => {
+      e.target.blur();
+      setPlacementMode(!isPlacementMode);
+    });
+
+    document.getElementById('saveLocalBtn').addEventListener('click', (e) => {
+      e.target.blur();
+      localStorage.setItem('custom_runner_level', JSON.stringify(rectangles));
+      alert('Level saved to LocalStorage!');
+    });
+
+    document.getElementById('loadLocalBtn').addEventListener('click', (e) => {
+      e.target.blur();
+      const data = localStorage.getItem('custom_runner_level');
+      if (data) {
+        rectangles = JSON.parse(data);
+        restartGame();
+        alert('Level loaded from LocalStorage!');
+      } else {
+        alert('No saved level found in LocalStorage.');
+      }
+    });
+
+    document.getElementById('exportBtn').addEventListener('click', (e) => {
+      e.target.blur();
+      const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(rectangles, null, 2));
+      const downloadAnchor = document.createElement('a');
+      downloadAnchor.setAttribute("href", dataStr);
+      downloadAnchor.setAttribute("download", "level.json");
+      document.body.appendChild(downloadAnchor);
+      downloadAnchor.click();
+      downloadAnchor.remove();
+    });
+
+    document.getElementById('importBtn').addEventListener('click', (e) => {
+      e.target.blur();
+      document.getElementById('fileInput').click();
+    });
+
+    document.getElementById('fileInput').addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        try {
+          rectangles = JSON.parse(event.target.result);
+          alert('Level imported successfully!');
+        } catch (err) {
+          alert('Invalid JSON file.');
+        }
+      };
+      reader.readAsText(file);
+    });
+
+    document.getElementById('clearBtn').addEventListener('click', (e) => {
+      e.target.blur();
+      if (confirm('Are you sure you want to clear all rectangles?')) {
+        rectangles = getDefaultRectangles();
+        selectedRects = [];
+        selectedRect = null;
+      }
+    });
+
+    canvas.addEventListener('wheel', (e) => {
+      if (!isEditor) return;
+      e.preventDefault();
+      
+      // Check if it's a touchpad (has ctrlKey or small delta values)
+      if (e.ctrlKey || (Math.abs(e.deltaY) < 100 && Math.abs(e.deltaX) < 100)) {
+        // Touchpad pinch zoom (ctrl + scroll)
+        if (e.ctrlKey) {
+          const zoomFactor = e.deltaY < 0 ? 1.05 : 0.95;
+          editorZoom = Math.max(0.2, Math.min(4.0, editorZoom * zoomFactor));
+        } else if ((e.buttons === 1 || e.buttons === 2) && (Math.abs(e.deltaX) > 10 || Math.abs(e.deltaY) > 10)) {
+          // Touchpad two-finger scroll + mousedown for panning
+          editorCamX -= e.deltaX / editorZoom;
+          editorCamY -= e.deltaY / editorZoom;
+        }
+      } else {
+        // Regular mouse wheel for zoom
+        const zoomFactor = e.deltaY < 0 ? 1.1 : 0.9;
+        editorZoom = Math.max(0.2, Math.min(4.0, editorZoom * zoomFactor));
+      }
+    }, { passive: false });
+
+    function getCornerHandle(e, rect) {
+      if (!rect) return null;
+      const sp = worldToScreenEditor(rect.x, rect.y);
+      const sw = rect.w * editorZoom;
+      const sh = rect.h * editorZoom;
+      const hitRadius = 10;
+
+      const corners = [
+        { name: 'tl', x: sp.x, y: sp.y },
+        { name: 'tr', x: sp.x + sw, y: sp.y },
+        { name: 'bl', x: sp.x, y: sp.y + sh },
+        { name: 'br', x: sp.x + sw, y: sp.y + sh }
+      ];
+
+      for (let c of corners) {
+        if (Math.hypot(e.clientX - c.x, e.clientY - c.y) <= hitRadius) {
+          return c.name;
+        }
+      }
+      return null;
+    }
+
+    function saveEditorState() {
+      undoStack.push(JSON.stringify(rectangles));
+      redoStack = [];
+      if (undoStack.length > 50) undoStack.shift();
+    }
+
+    function undo() {
+      if (undoStack.length === 0) return;
+      redoStack.push(JSON.stringify(rectangles));
+      rectangles = JSON.parse(undoStack.pop());
+      selectedRects = [];
+      selectedRect = null;
+    }
+
+    function redo() {
+      if (redoStack.length === 0) return;
+      undoStack.push(JSON.stringify(rectangles));
+      rectangles = JSON.parse(redoStack.pop());
+      selectedRects = [];
+      selectedRect = null;
+    }
+
+    canvas.addEventListener('mousedown', (e) => {
+      if (!isEditor) return;
+      const mouseWorld = screenToWorldEditor(e.clientX, e.clientY);
+      lastMouseX = e.clientX;
+      lastMouseY = e.clientY;
+
+      if (e.button === 1) {
+        isPanning = true;
+        panStart = { x: e.clientX, y: e.clientY };
+        return;
+      }
+
+      if (selectedRects.length > 0) {
+        for (const rect of selectedRects) {
+          const corner = getCornerHandle(e, rect);
+          if (corner) {
+            saveEditorState();
+            resizeHandle = corner;
+            resizeInitial = { x: rect.x, y: rect.y, w: rect.w, h: rect.h };
+            selectedRect = rect;
+            return;
+          }
+        }
+        // Check if clicking on any selected rectangle
+        let clickedOnSelected = false;
+        for (const rect of selectedRects) {
+          if (
+            mouseWorld.x >= rect.x &&
+            mouseWorld.x <= rect.x + rect.w &&
+            mouseWorld.y >= rect.y &&
+            mouseWorld.y <= rect.y + rect.h
+          ) {
+            clickedOnSelected = true;
+            break;
+          }
+        }
+        if (clickedOnSelected) {
+          // Start group drag
+          isDragging = true;
+          dragStartPositions = selectedRects.map(r => ({ x: r.x, y: r.y }));
+          dragOffset = { x: mouseWorld.x - selectedRects[0].x, y: mouseWorld.y - selectedRects[0].y };
+          return;
+        }
+      }
+
+      if (e.shiftKey) {
+        // Multi-selection mode
+        isSelecting = true;
+        selectionStart = mouseWorld;
+        return;
+      }
+
+      // Single selection
+      selectedRects = [];
+      selectedRect = null;
+      for (let i = rectangles.length - 1; i >= 0; i--) {
+        const r = rectangles[i];
+        if (
+          mouseWorld.x >= r.x &&
+          mouseWorld.x <= r.x + r.w &&
+          mouseWorld.y >= r.y &&
+          mouseWorld.y <= r.y + r.h
+        ) {
+          selectedRect = r;
+          selectedRects = [r];
+          isDragging = true;
+          dragOffset = { x: mouseWorld.x - r.x, y: mouseWorld.y - r.y };
+          dragStartPositions = [{ x: r.x, y: r.y }];
+          rectTypeSelect.value = r.type;
+          setPlacementMode(false);
+          break;
+        }
+      }
+
+      if (!selectedRect && e.button === 0 && isPlacementMode) {
+        saveEditorState();
+        let spawnX = mouseWorld.x - 72;
+        let spawnY = mouseWorld.y - 24;
+        if (e.shiftKey) {
+          spawnX = Math.round(spawnX / GRID_SIZE) * GRID_SIZE;
+          spawnY = Math.round(spawnY / GRID_SIZE) * GRID_SIZE;
+        }
+
+        const newRect = {
+          x: Math.round(spawnX),
+          y: Math.round(spawnY),
+          w: 144,
+          h: 48,
+          type: rectTypeSelect.value
+        };
+        rectangles.push(newRect);
+        selectedRect = newRect;
+        selectedRects = [newRect];
+        isDragging = true;
+        dragOffset = { x: mouseWorld.x - newRect.x, y: mouseWorld.y - newRect.y };
+        setPlacementMode(false);
+      }
+    });
+
+    canvas.addEventListener('mousemove', (e) => {
+      if (!isEditor) return;
+      lastMouseX = e.clientX;
+      lastMouseY = e.clientY;
+
+      if (isPanning) {
+        editorCamX -= (e.clientX - panStart.x) / editorZoom;
+        editorCamY -= (e.clientY - panStart.y) / editorZoom;
+        panStart = { x: e.clientX, y: e.clientY };
+        return;
+      }
+
+      const mouseWorld = screenToWorldEditor(e.clientX, e.clientY);
+
+      if (isSelecting) {
+        // Box selection mode - handled in render
+        return;
+      }
+
+      if (resizeHandle && selectedRect) {
+        let curX = mouseWorld.x;
+        let curY = mouseWorld.y;
+
+        let left = resizeInitial.x;
+        let right = resizeInitial.x + resizeInitial.w;
+        let top = resizeInitial.y;
+        let bottom = resizeInitial.y + resizeInitial.h;
+
+        if (resizeHandle.includes('l')) left = curX;
+        if (resizeHandle.includes('r')) right = curX;
+        if (resizeHandle.includes('t')) top = curY;
+        if (resizeHandle.includes('b')) bottom = curY;
+
+        if (e.shiftKey) {
+          if (resizeHandle.includes('l')) left = Math.round(left / GRID_SIZE) * GRID_SIZE;
+          if (resizeHandle.includes('r')) right = Math.round(right / GRID_SIZE) * GRID_SIZE;
+          if (resizeHandle.includes('t')) top = Math.round(top / GRID_SIZE) * GRID_SIZE;
+          if (resizeHandle.includes('b')) bottom = Math.round(bottom / GRID_SIZE) * GRID_SIZE;
+        }
+
+        if (right - left >= GRID_SIZE) {
+          selectedRect.x = left;
+          selectedRect.w = right - left;
+        }
+        if (bottom - top >= GRID_SIZE) {
+          selectedRect.y = top;
+          selectedRect.h = bottom - top;
+        }
+      } else if (isDragging && selectedRects.length > 0) {
+        let newX = mouseWorld.x - dragOffset.x;
+        let newY = mouseWorld.y - dragOffset.y;
+
+        if (e.shiftKey) {
+          newX = Math.round(newX / GRID_SIZE) * GRID_SIZE;
+          newY = Math.round(newY / GRID_SIZE) * GRID_SIZE;
+        }
+
+        // Calculate movement based on first selected rectangle's initial position
+        const deltaX = newX - dragStartPositions[0].x;
+        const deltaY = newY - dragStartPositions[0].y;
+
+        for (let i = 0; i < selectedRects.length; i++) {
+          const rect = selectedRects[i];
+          const startPos = dragStartPositions[i];
+          rect.x = Math.round(startPos.x + deltaX);
+          rect.y = Math.round(startPos.y + deltaY);
+        }
+      }
+    });
+
+    window.addEventListener('mouseup', (e) => {
+      if (isSelecting) {
+        const mouseWorld = screenToWorldEditor(e.clientX, e.clientY);
+        const minX = Math.min(selectionStart.x, mouseWorld.x);
+        const maxX = Math.max(selectionStart.x, mouseWorld.x);
+        const minY = Math.min(selectionStart.y, mouseWorld.y);
+        const maxY = Math.max(selectionStart.y, mouseWorld.y);
+
+        // Select all rectangles in the box
+        selectedRects = [];
+        for (const r of rectangles) {
+          if (r.x >= minX && r.x + r.w <= maxX && r.y >= minY && r.y + r.h <= maxY) {
+            selectedRects.push(r);
+          }
+        }
+        selectedRect = selectedRects.length > 0 ? selectedRects[0] : null;
+        dragStartPositions = selectedRects.map(r => ({ x: r.x, y: r.y }));
+        isSelecting = false;
+      }
+      
+      if (isDragging) {
+        saveEditorState();
+      }
+      
+      isDragging = false;
+      resizeHandle = null;
+      isPanning = false;
+    });
+
+    rectTypeSelect.addEventListener('change', (e) => {
+      e.target.blur();
+      if (selectedRects.length > 0) {
+        for (const rect of selectedRects) {
+          rect.type = rectTypeSelect.value;
+        }
+      }
+    });
+
+    window.addEventListener('keydown', (e) => {
+      initAudio();
+      if (e.key === 'Tab' || e.code === 'Space' || e.key === ' ' || e.code.startsWith('Arrow')) {
+        e.preventDefault();
+      }
+
+      if (e.key === 'Shift') keys.shift = true;
+      if (e.code === 'ShiftLeft' || e.code === 'ShiftRight' || e.code === 'ArrowDown' || e.code === 'KeyS') keys.crouch = true;
+
+      if (isEditor) {
+        // Undo (Ctrl+Z)
+        if ((e.ctrlKey || e.metaKey) && e.code === 'KeyZ') {
+          undo();
+          e.preventDefault();
+        }
+        
+        // Redo (Ctrl+Y)
+        if ((e.ctrlKey || e.metaKey) && e.code === 'KeyY') {
+          redo();
+          e.preventDefault();
+        }
+        
+        // Copy (Ctrl+C)
+        if ((e.ctrlKey || e.metaKey) && e.code === 'KeyC' && selectedRects.length > 0) {
+          clipboard = selectedRects.map(r => ({ ...r }));
+          e.preventDefault();
+        }
+        
+        // Paste (Ctrl+V)
+        if ((e.ctrlKey || e.metaKey) && e.code === 'KeyV' && clipboard) {
+          saveEditorState();
+          const pastedRects = clipboard.map(r => ({ ...r }));
+          rectangles.push(...pastedRects);
+          selectedRects = pastedRects;
+          selectedRect = pastedRects[0];
+          e.preventDefault();
+        }
+        
+        // Rotate (R)
+        if (e.code === 'KeyR' && selectedRects.length > 0) {
+          saveEditorState();
+          for (const rect of selectedRects) {
+            const temp = rect.w;
+            rect.w = rect.h;
+            rect.h = temp;
+          }
+          e.preventDefault();
+        }
+        
+        // Delete
+        if ((e.code === 'Delete' || e.code === 'Backspace') && selectedRects.length > 0) {
+          saveEditorState();
+          rectangles = rectangles.filter(r => !selectedRects.includes(r));
+          selectedRects = [];
+          selectedRect = null;
+          e.preventDefault();
+        }
+        return;
+      }
+
+      if (e.code === 'KeyA' || e.code === 'ArrowLeft') keys.left = true;
+      if (e.code === 'KeyD' || e.code === 'ArrowRight') keys.right = true;
+      if (e.code === 'Space' || e.code === 'KeyW' || e.code === 'ArrowUp') {
+        keys.jump = true;
+        if (!player.isAlive) restartGame();
+      }
+    });
+
+    window.addEventListener('keyup', (e) => {
+      if (e.key === 'Shift') keys.shift = false;
+      if (e.code === 'ShiftLeft' || e.code === 'ShiftRight' || e.code === 'ArrowDown' || e.code === 'KeyS') keys.crouch = false;
+      if (e.code === 'KeyA' || e.code === 'ArrowLeft') keys.left = false;
+      if (e.code === 'KeyD' || e.code === 'ArrowRight') keys.right = false;
+      if (e.code === 'Space' || e.code === 'KeyW' || e.code === 'ArrowUp') keys.jump = false;
+    });
+
+    window.addEventListener('touchstart', (e) => {
+      initAudio();
+      if (isEditor) return;
+      if (!player.isAlive) {
+        restartGame();
+        return;
+      }
+      const touchX = e.touches[0].clientX;
+      if (touchX < width * 0.3) {
+        keys.left = true;
+      } else if (touchX < width * 0.6) {
+        keys.right = true;
+      } else {
+        keys.jump = true;
+      }
+    });
+
+    window.addEventListener('touchend', () => {
+      keys.left = false;
+      keys.right = false;
+      keys.jump = false;
+    });
+
+    // Touch support for editor
+    canvas.addEventListener('touchstart', (e) => {
+      if (!isEditor) return;
+      e.preventDefault();
+      
+      if (e.touches.length === 2) {
+        // Two-finger pinch for zoom
+        touchStartDist = Math.hypot(
+          e.touches[0].clientX - e.touches[1].clientX,
+          e.touches[0].clientY - e.touches[1].clientY
+        );
+        touchStartZoom = editorZoom;
+        isPanning = true;
+        panStart = { 
+          x: (e.touches[0].clientX + e.touches[1].clientX) / 2,
+          y: (e.touches[0].clientY + e.touches[1].clientY) / 2
+        };
+        return;
+      }
+      
+      if (e.touches.length === 1) {
+        const touch = e.touches[0];
+        const mouseWorld = screenToWorldEditor(touch.clientX, touch.clientY);
+        lastMouseX = touch.clientX;
+        lastMouseY = touch.clientY;
+
+        if (selectedRects.length > 0) {
+          for (const rect of selectedRects) {
+            const corner = getCornerHandle({ clientX: touch.clientX, clientY: touch.clientY }, rect);
+            if (corner) {
+              saveEditorState();
+              resizeHandle = corner;
+              resizeInitial = { x: rect.x, y: rect.y, w: rect.w, h: rect.h };
+              selectedRect = rect;
+              return;
+            }
+          }
+          // Check if clicking on any selected rectangle
+          let clickedOnSelected = false;
+          for (const rect of selectedRects) {
+            if (
+              mouseWorld.x >= rect.x &&
+              mouseWorld.x <= rect.x + rect.w &&
+              mouseWorld.y >= rect.y &&
+              mouseWorld.y <= rect.y + rect.h
+            ) {
+              clickedOnSelected = true;
+              break;
+            }
+          }
+          if (clickedOnSelected) {
+            isDragging = true;
+            dragStartPositions = selectedRects.map(r => ({ x: r.x, y: r.y }));
+            dragOffset = { x: mouseWorld.x - selectedRects[0].x, y: mouseWorld.y - selectedRects[0].y };
+            return;
+          }
+        }
+
+        // Single selection
+        selectedRects = [];
+        selectedRect = null;
+        for (let i = rectangles.length - 1; i >= 0; i--) {
+          const r = rectangles[i];
+          if (
+            mouseWorld.x >= r.x &&
+            mouseWorld.x <= r.x + r.w &&
+            mouseWorld.y >= r.y &&
+            mouseWorld.y <= r.y + r.h
+          ) {
+            selectedRect = r;
+            selectedRects = [r];
+            isDragging = true;
+            dragOffset = { x: mouseWorld.x - r.x, y: mouseWorld.y - r.y };
+            dragStartPositions = [{ x: r.x, y: r.y }];
+            rectTypeSelect.value = r.type;
+            setPlacementMode(false);
+            break;
+          }
+        }
+
+        if (!selectedRect && isPlacementMode) {
+          saveEditorState();
+          let spawnX = mouseWorld.x - 72;
+          let spawnY = mouseWorld.y - 24;
+          spawnX = Math.round(spawnX / GRID_SIZE) * GRID_SIZE;
+          spawnY = Math.round(spawnY / GRID_SIZE) * GRID_SIZE;
+
+          const newRect = {
+            x: Math.round(spawnX),
+            y: Math.round(spawnY),
+            w: 144,
+            h: 48,
+            type: rectTypeSelect.value
+          };
+          rectangles.push(newRect);
+          selectedRect = newRect;
+          selectedRects = [newRect];
+          isDragging = true;
+          dragOffset = { x: mouseWorld.x - newRect.x, y: mouseWorld.y - newRect.y };
+          setPlacementMode(false);
+        }
+      }
+    }, { passive: false });
+
+    canvas.addEventListener('touchmove', (e) => {
+      if (!isEditor) return;
+      e.preventDefault();
+      
+      if (e.touches.length === 2) {
+        // Two-finger pinch for zoom
+        const currentDist = Math.hypot(
+          e.touches[0].clientX - e.touches[1].clientX,
+          e.touches[0].clientY - e.touches[1].clientY
+        );
+        const zoomFactor = currentDist / touchStartDist;
+        editorZoom = Math.max(0.2, Math.min(4.0, touchStartZoom * zoomFactor));
+        
+        // Two-finger pan
+        const currentPanX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+        const currentPanY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+        editorCamX -= (currentPanX - panStart.x) / editorZoom;
+        editorCamY -= (currentPanY - panStart.y) / editorZoom;
+        panStart = { x: currentPanX, y: currentPanY };
+        return;
+      }
+      
+      if (e.touches.length === 1) {
+        const touch = e.touches[0];
+        lastMouseX = touch.clientX;
+        lastMouseY = touch.clientY;
+        const mouseWorld = screenToWorldEditor(touch.clientX, touch.clientY);
+
+        if (resizeHandle && selectedRect) {
+          let curX = mouseWorld.x;
+          let curY = mouseWorld.y;
+
+          let left = resizeInitial.x;
+          let right = resizeInitial.x + resizeInitial.w;
+          let top = resizeInitial.y;
+          let bottom = resizeInitial.y + resizeInitial.h;
+
+          if (resizeHandle.includes('l')) left = curX;
+          if (resizeHandle.includes('r')) right = curX;
+          if (resizeHandle.includes('t')) top = curY;
+          if (resizeHandle.includes('b')) bottom = curY;
+
+          left = Math.round(left / GRID_SIZE) * GRID_SIZE;
+          right = Math.round(right / GRID_SIZE) * GRID_SIZE;
+          top = Math.round(top / GRID_SIZE) * GRID_SIZE;
+          bottom = Math.round(bottom / GRID_SIZE) * GRID_SIZE;
+
+          if (right - left >= GRID_SIZE) {
+            selectedRect.x = left;
+            selectedRect.w = right - left;
+          }
+          if (bottom - top >= GRID_SIZE) {
+            selectedRect.y = top;
+            selectedRect.h = bottom - top;
+          }
+        } else if (isDragging && selectedRects.length > 0) {
+          let newX = mouseWorld.x - dragOffset.x;
+          let newY = mouseWorld.y - dragOffset.y;
+
+          newX = Math.round(newX / GRID_SIZE) * GRID_SIZE;
+          newY = Math.round(newY / GRID_SIZE) * GRID_SIZE;
+
+          const deltaX = newX - dragStartPositions[0].x;
+          const deltaY = newY - dragStartPositions[0].y;
+
+          for (let i = 0; i < selectedRects.length; i++) {
+            const rect = selectedRects[i];
+            const startPos = dragStartPositions[i];
+            rect.x = Math.round(startPos.x + deltaX);
+            rect.y = Math.round(startPos.y + deltaY);
+          }
+        }
+      }
+    }, { passive: false });
+
+    canvas.addEventListener('touchend', (e) => {
+      if (!isEditor) return;
+      
+      if (isDragging) {
+        saveEditorState();
+      }
+      
+      isDragging = false;
+      resizeHandle = null;
+      isPanning = false;
+    });
+
+    window.onload = function () {
+      loadDefaultLevel();
+      restartGame();
+      gameLoop();
+    };
+  </script>
+</body>
+</html>

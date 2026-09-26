@@ -1,0 +1,1 @@
+importScripts('/node_modules/@mercuryworkshop/bare-mux/dist/worker.js');
