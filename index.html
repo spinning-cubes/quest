@@ -114,7 +114,7 @@
         platformShadow: 'rgba(0, 0, 0, 0.2)',
         bolt: '#4a4a4a',
         player: '#ffffff',
-        remotePlayer: '#ffffff' // Purple color for remote player
+        remotePlayer: '#e74c3c'
     };
 
     const CAMERA_ZOOM = 1.5;
@@ -267,19 +267,30 @@
     function setupConnection() {
       conn.on('open', () => {
         console.log('Peer Connected!');
+        sendLevelSync();
+        sendPlayerState();
       });
 
       conn.on('data', (data) => {
-        if (!remotePlayer) {
-          remotePlayer = {
-            x: data.x, y: data.y, vx: data.vx, vy: data.vy,
-            facing: data.facing, animPhase: data.animPhase,
-            isGrounded: data.isGrounded, crouchFactor: data.crouchFactor,
-            isAlive: data.isAlive, color: PALETTE.remotePlayer,
-            leg1: { x: data.x, y: data.y }, leg2: { x: data.x, y: data.y }
-          };
-        } else {
-          Object.assign(remotePlayer, data);
+        if (data.type === 'levelSync') {
+          syncLevelFromRemote(data.rectangles);
+        } else if (data.type === 'death') {
+          createExplosion(data.x, data.y, PALETTE.remotePlayer);
+          playCrashSound();
+        } else if (data.type === 'playerState' || data.x !== undefined) {
+          if (!remotePlayer) {
+            remotePlayer = {
+              x: data.x, y: data.y, vx: data.vx, vy: data.vy,
+              facing: data.facing, animPhase: data.animPhase,
+              isGrounded: data.isGrounded, crouchFactor: data.crouchFactor,
+              isAlive: data.isAlive, color: PALETTE.remotePlayer,
+              isEditor: data.isEditor,
+              cursorX: data.cursorX, cursorY: data.cursorY,
+              leg1: { x: data.x, y: data.y }, leg2: { x: data.x, y: data.y }
+            };
+          } else {
+            Object.assign(remotePlayer, data);
+          }
         }
       });
     }
@@ -298,14 +309,16 @@
       if (!hostId) return;
 
       peer.on('open', () => {
-        conn = peer.connect(hostId, { reliable: false });
+        conn = peer.connect(hostId, { reliable: true });
         setupConnection();
       });
     };
 
     function sendPlayerState() {
       if (conn && conn.open) {
+        const mouseWorld = getCurrentMouseWorld();
         conn.send({
+          type: 'playerState',
           x: player.x,
           y: player.y,
           vx: player.vx,
@@ -314,7 +327,36 @@
           animPhase: player.animPhase,
           isGrounded: player.isGrounded,
           crouchFactor: player.crouchFactor,
-          isAlive: player.isAlive
+          isAlive: player.isAlive,
+          isEditor: isEditor,
+          cursorX: mouseWorld.x,
+          cursorY: mouseWorld.y
+        });
+      }
+    }
+
+    function sendLevelSync() {
+      if (conn && conn.open) {
+        conn.send({
+          type: 'levelSync',
+          rectangles: rectangles
+        });
+      }
+    }
+
+    function syncLevelFromRemote(newRects) {
+      const selectedIndices = selectedRects.map(r => rectangles.indexOf(r)).filter(i => i !== -1);
+      rectangles = newRects;
+      selectedRects = selectedIndices.map(i => rectangles[i]).filter(i => i < rectangles.length && rectangles[i]);
+      selectedRect = selectedRects.length > 0 ? selectedRects[0] : null;
+    }
+
+    function sendDeathEvent(x, y) {
+      if (conn && conn.open) {
+        conn.send({
+          type: 'death',
+          x: x,
+          y: y
         });
       }
     }
@@ -703,7 +745,7 @@
       ctx.restore();
     }
 
-    function createExplosion(x, y) {
+    function createExplosion(x, y, color = PALETTE.player) {
       for (let i = 0; i < 28; i++) {
         const angle = Math.random() * Math.PI * 2;
         const speed = 2 + Math.random() * 6;
@@ -714,27 +756,57 @@
           vy: Math.sin(angle) * speed - 1,
           size: 4 + Math.random() * 8,
           alpha: 1,
-          life: 0.02 + Math.random() * 0.03
+          life: 0.02 + Math.random() * 0.03,
+          color: color
         });
       }
     }
 
+    function drawCursorAtScreenPos(sx, sy, isEditorMode) {
+      ctx.save();
+      ctx.fillStyle = PALETTE.remotePlayer;
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1.5;
+      
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.lineTo(sx, sy + 16);
+      ctx.lineTo(sx + 4.5, sy + 12);
+      ctx.lineTo(sx + 9, sy + 18);
+      ctx.lineTo(sx + 12, sy + 16.5);
+      ctx.lineTo(sx + 7.5, sy + 10.5);
+      ctx.lineTo(sx + 12, sy + 10.5);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = '11px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+      ctx.shadowColor = 'rgba(0,0,0,0.8)';
+      ctx.shadowBlur = 4;
+      ctx.fillText(isEditorMode ? 'Peer (Editor)' : 'Peer', sx + 14, sy + 14);
+      ctx.restore();
+    }
+
     function update() {
+      // Animate explosion particles continuously for all clients
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const pt = particles[i];
+        pt.x += pt.vx;
+        pt.y += pt.vy;
+        pt.vy += 0.15;
+        pt.alpha -= pt.life;
+        if (pt.alpha <= 0) particles.splice(i, 1);
+      }
+
       if (isEditor) {
         const activeCamX = editorCamX - (width / editorZoom) * 0.5;
         updateGrassSystem(activeCamX);
+        sendPlayerState();
         return;
       }
 
       if (!player.isAlive) {
-        for (let i = particles.length - 1; i >= 0; i--) {
-          const pt = particles[i];
-          pt.x += pt.vx;
-          pt.y += pt.vy;
-          pt.vy += 0.15;
-          pt.alpha -= pt.life;
-          if (pt.alpha <= 0) particles.splice(i, 1);
-        }
         sendPlayerState();
         return;
       }
@@ -790,7 +862,9 @@
           if (box.right > rect.x && box.left < rect.x + rect.w && box.bottom > rect.y && box.top < rect.y + rect.h) {
             player.isAlive = false;
             playCrashSound();
-            createExplosion(player.x, player.y - 20);
+            const deathY = player.y - 20;
+            createExplosion(player.x, deathY);
+            sendDeathEvent(player.x, deathY);
             sendPlayerState();
             return;
           }
@@ -816,7 +890,9 @@
           if (box.right > rect.x && box.left < rect.x + rect.w && box.bottom > rect.y && box.top < rect.y + rect.h) {
             player.isAlive = false;
             playCrashSound();
-            createExplosion(player.x, player.y - 20);
+            const deathY = player.y - 20;
+            createExplosion(player.x, deathY);
+            sendDeathEvent(player.x, deathY);
             sendPlayerState();
             return;
           }
@@ -849,7 +925,9 @@
       if (player.y > viewHeight + 300) {
         player.isAlive = false;
         playCrashSound();
-        createExplosion(player.x, player.y - 50);
+        const deathY = player.y - 50;
+        createExplosion(player.x, deathY);
+        sendDeathEvent(player.x, deathY);
       }
 
       const targetCamX = player.x - (width / CAMERA_ZOOM) * 0.5;
@@ -903,12 +981,12 @@
       for (let pt of particles) {
         ctx.save();
         ctx.globalAlpha = Math.max(0, pt.alpha);
-        ctx.fillStyle = PALETTE.player;
+        ctx.fillStyle = pt.color || PALETTE.player;
         ctx.fillRect(pt.x - camX, pt.y - camY, pt.size, pt.size);
         ctx.restore();
       }
 
-      if (remotePlayer && remotePlayer.isAlive) {
+      if (remotePlayer && remotePlayer.isAlive && !remotePlayer.isEditor) {
         drawPlayer(remotePlayer, camX, camY);
       }
 
@@ -924,6 +1002,12 @@
       renderWorldObjects(cameraX, cameraY);
 
       ctx.restore();
+
+      if (remotePlayer && remotePlayer.cursorX !== undefined && (remotePlayer.isEditor || !remotePlayer.isAlive)) {
+        const spX = (remotePlayer.cursorX - cameraX) * CAMERA_ZOOM;
+        const spY = (remotePlayer.cursorY - cameraY) * CAMERA_ZOOM;
+        drawCursorAtScreenPos(spX, spY, remotePlayer.isEditor);
+      }
 
       ctx.fillStyle = PALETTE.player;
       ctx.font = '400 20px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
@@ -962,6 +1046,17 @@
         x: (sx - width / 2) / editorZoom + editorCamX,
         y: (sy - height / 2) / editorZoom + editorCamY
       };
+    }
+
+    function getCurrentMouseWorld() {
+      if (isEditor) {
+        return screenToWorldEditor(lastMouseX, lastMouseY);
+      } else {
+        return {
+          x: lastMouseX / CAMERA_ZOOM + cameraX,
+          y: lastMouseY / CAMERA_ZOOM + cameraY
+        };
+      }
     }
 
     function drawGrid() {
@@ -1040,6 +1135,11 @@
       }
 
       ctx.restore();
+
+      if (remotePlayer && remotePlayer.cursorX !== undefined) {
+        const sp = worldToScreenEditor(remotePlayer.cursorX, remotePlayer.cursorY);
+        drawCursorAtScreenPos(sp.x, sp.y, remotePlayer.isEditor);
+      }
     }
 
     function render() {
@@ -1161,6 +1261,7 @@
       if (data) {
         rectangles = JSON.parse(data);
         restartGame();
+        sendLevelSync();
         alert('Level loaded from LocalStorage!');
       } else {
         alert('No saved level found in LocalStorage.');
@@ -1190,6 +1291,7 @@
       reader.onload = (event) => {
         try {
           rectangles = JSON.parse(event.target.result);
+          sendLevelSync();
           alert('Level imported successfully!');
         } catch (err) {
           alert('Invalid JSON file.');
@@ -1204,6 +1306,7 @@
         rectangles = getDefaultRectangles();
         selectedRects = [];
         selectedRect = null;
+        sendLevelSync();
       }
     });
 
@@ -1259,6 +1362,7 @@
       rectangles = JSON.parse(undoStack.pop());
       selectedRects = [];
       selectedRect = null;
+      sendLevelSync();
     }
 
     function redo() {
@@ -1267,13 +1371,14 @@
       rectangles = JSON.parse(redoStack.pop());
       selectedRects = [];
       selectedRect = null;
+      sendLevelSync();
     }
 
     canvas.addEventListener('mousedown', (e) => {
-      if (!isEditor) return;
-      const mouseWorld = screenToWorldEditor(e.clientX, e.clientY);
       lastMouseX = e.clientX;
       lastMouseY = e.clientY;
+      if (!isEditor) return;
+      const mouseWorld = screenToWorldEditor(e.clientX, e.clientY);
 
       if (e.button === 1) {
         isPanning = true;
@@ -1361,13 +1466,14 @@
         isDragging = true;
         dragOffset = { x: mouseWorld.x - newRect.x, y: mouseWorld.y - newRect.y };
         setPlacementMode(false);
+        sendLevelSync();
       }
     });
 
     canvas.addEventListener('mousemove', (e) => {
-      if (!isEditor) return;
       lastMouseX = e.clientX;
       lastMouseY = e.clientY;
+      if (!isEditor) return;
 
       if (isPanning) {
         editorCamX -= (e.clientX - panStart.x) / editorZoom;
@@ -1411,6 +1517,7 @@
           selectedRect.y = top;
           selectedRect.h = bottom - top;
         }
+        sendLevelSync();
       } else if (isDragging && selectedRects.length > 0) {
         let newX = mouseWorld.x - dragOffset.x;
         let newY = mouseWorld.y - dragOffset.y;
@@ -1429,6 +1536,7 @@
           rect.x = Math.round(startPos.x + deltaX);
           rect.y = Math.round(startPos.y + deltaY);
         }
+        sendLevelSync();
       }
     });
 
@@ -1453,6 +1561,7 @@
       
       if (isDragging) {
         saveEditorState();
+        sendLevelSync();
       }
       
       isDragging = false;
@@ -1466,6 +1575,7 @@
         for (const rect of selectedRects) {
           rect.type = rectTypeSelect.value;
         }
+        sendLevelSync();
       }
     });
 
@@ -1499,6 +1609,7 @@
           rectangles.push(...pastedRects);
           selectedRects = pastedRects;
           selectedRect = pastedRects[0];
+          sendLevelSync();
           e.preventDefault();
         }
         if (e.code === 'KeyR' && selectedRects.length > 0) {
@@ -1508,6 +1619,7 @@
             rect.w = rect.h;
             rect.h = temp;
           }
+          sendLevelSync();
           e.preventDefault();
         }
         if ((e.code === 'Delete' || e.code === 'Backspace') && selectedRects.length > 0) {
@@ -1515,6 +1627,7 @@
           rectangles = rectangles.filter(r => !selectedRects.includes(r));
           selectedRects = [];
           selectedRect = null;
+          sendLevelSync();
           e.preventDefault();
         }
         return;
@@ -1581,9 +1694,9 @@
       
       if (e.touches.length === 1) {
         const touch = e.touches[0];
-        const mouseWorld = screenToWorldEditor(touch.clientX, touch.clientY);
         lastMouseX = touch.clientX;
         lastMouseY = touch.clientY;
+        const mouseWorld = screenToWorldEditor(touch.clientX, touch.clientY);
 
         if (selectedRects.length > 0) {
           for (const rect of selectedRects) {
@@ -1657,6 +1770,7 @@
           isDragging = true;
           dragOffset = { x: mouseWorld.x - newRect.x, y: mouseWorld.y - newRect.y };
           setPlacementMode(false);
+          sendLevelSync();
         }
       }
     }, { passive: false });
@@ -1714,6 +1828,7 @@
             selectedRect.y = top;
             selectedRect.h = bottom - top;
           }
+          sendLevelSync();
         } else if (isDragging && selectedRects.length > 0) {
           let newX = mouseWorld.x - dragOffset.x;
           let newY = mouseWorld.y - dragOffset.y;
@@ -1730,6 +1845,7 @@
             rect.x = Math.round(startPos.x + deltaX);
             rect.y = Math.round(startPos.y + deltaY);
           }
+          sendLevelSync();
         }
       }
     }, { passive: false });
@@ -1739,6 +1855,7 @@
       
       if (isDragging) {
         saveEditorState();
+        sendLevelSync();
       }
       
       isDragging = false;
