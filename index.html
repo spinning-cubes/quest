@@ -4,6 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>Quest</title>
+  <!-- PeerJS Library CDN -->
+  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
   <style>
     * {
       margin: 0;
@@ -38,7 +40,7 @@
       border: none;
       color: #fff;
     }
-    button, select, label {
+    button, select, label, input[type="text"] {
       font-size: 11px;
       padding: 2px 6px;
       border: none;
@@ -47,6 +49,12 @@
       background: rgba(0, 0, 0, 0.4);
       color: #fff;
       outline: none;
+    }
+    input[type="text"] {
+      cursor: text;
+      user-select: text;
+      -webkit-user-select: text;
+      width: 110px;
     }
     button:hover {
       background: rgba(0, 0, 0, 0.6);
@@ -82,6 +90,13 @@
       <button id="clearBtn" tabindex="-1">Clear All</button>
       <input type="file" id="fileInput" accept=".json" tabindex="-1">
     </div>
+
+    <!-- PeerJS Connection UI -->
+    <div id="rtcControls" style="display: flex; gap: 4px; align-items: center;">
+      <button id="hostBtn" tabindex="-1">Host</button>
+      <input type="text" id="peerIdInput" placeholder="Enter Host ID..." tabindex="-1">
+      <button id="joinBtn" tabindex="-1">Join</button>
+    </div>
   </div>
 
   <canvas id="gameCanvas"></canvas>
@@ -98,7 +113,8 @@
         platform: '#723838',
         platformShadow: 'rgba(0, 0, 0, 0.2)',
         bolt: '#4a4a4a',
-        player: '#ffffff'
+        player: '#ffffff',
+        remotePlayer: '#ffffff' // Purple color for remote player
     };
 
     const CAMERA_ZOOM = 1.5;
@@ -113,6 +129,7 @@
     let groundY = Math.floor(((height / CAMERA_ZOOM) * 0.75) / GRID_SIZE) * GRID_SIZE;
 
     let cameraX = 0;
+    let cameraY = 0;
     let editorCamX = 0;
     let editorCamY = 0;
     let editorZoom = 1.0;
@@ -127,7 +144,18 @@
 
     let rectangles = [];
 
-    function loadDefaultLevel() {
+    async function loadDefaultLevel() {
+      try {
+        const response = await fetch('level.json');
+        if (response.ok) {
+          const levelData = await response.json();
+          rectangles = levelData;
+          return;
+        }
+      } catch (err) {
+        console.log('Could not load level.json, trying localStorage');
+      }
+
       const savedLevel = localStorage.getItem('custom_runner_level');
       if (savedLevel) {
         try {
@@ -208,8 +236,88 @@
       leg1: { x: 0, y: 0 },
       leg2: { x: 0, y: 0 },
       isCrouching: false,
-      crouchFactor: 0 // 0 = standing, 1 = fully crouched
+      crouchFactor: 0
     };
+
+    let remotePlayer = null;
+
+    // --- PeerJS Networking Integration ---
+    let peer = null;
+    let conn = null;
+
+    function initPeerJS() {
+      if (peer) return;
+
+      peer = new Peer({
+        config: {
+          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+        }
+      });
+
+      peer.on('open', (id) => {
+        console.log('PeerJS ID:', id);
+      });
+
+      peer.on('connection', (connection) => {
+        conn = connection;
+        setupConnection();
+      });
+    }
+
+    function setupConnection() {
+      conn.on('open', () => {
+        console.log('Peer Connected!');
+      });
+
+      conn.on('data', (data) => {
+        if (!remotePlayer) {
+          remotePlayer = {
+            x: data.x, y: data.y, vx: data.vx, vy: data.vy,
+            facing: data.facing, animPhase: data.animPhase,
+            isGrounded: data.isGrounded, crouchFactor: data.crouchFactor,
+            isAlive: data.isAlive, color: PALETTE.remotePlayer,
+            leg1: { x: data.x, y: data.y }, leg2: { x: data.x, y: data.y }
+          };
+        } else {
+          Object.assign(remotePlayer, data);
+        }
+      });
+    }
+
+    document.getElementById('hostBtn').onclick = () => {
+      initPeerJS();
+      peer.on('open', (id) => {
+        navigator.clipboard.writeText(id).catch(() => {});
+        prompt('Hosting! Share this Peer ID with your friend:', id);
+      });
+    };
+
+    document.getElementById('joinBtn').onclick = () => {
+      initPeerJS();
+      const hostId = document.getElementById('peerIdInput').value || prompt('Enter Host Peer ID:');
+      if (!hostId) return;
+
+      peer.on('open', () => {
+        conn = peer.connect(hostId, { reliable: false });
+        setupConnection();
+      });
+    };
+
+    function sendPlayerState() {
+      if (conn && conn.open) {
+        conn.send({
+          x: player.x,
+          y: player.y,
+          vx: player.vx,
+          vy: player.vy,
+          facing: player.facing,
+          animPhase: player.animPhase,
+          isGrounded: player.isGrounded,
+          crouchFactor: player.crouchFactor,
+          isAlive: player.isAlive
+        });
+      }
+    }
 
     let particles = [];
     let distanceMetres = 0;
@@ -239,7 +347,6 @@
       const r2 = (hash * 10) - Math.floor(hash * 10);
       const r3 = (hash * 100) - Math.floor(hash * 100);
       
-      // Increase blade density near edges
       let edgeFactor = 1.0;
       if (edgeDist < 48) {
         edgeFactor = 1.0 + (48 - edgeDist) / 48 * 0.5;
@@ -251,18 +358,6 @@
         height: (32 + r3 * 24) * edgeFactor,
         lean: (r1 - 0.5) * 8
       };
-    }
-
-    function getGrassAt(x) {
-      let highestGrass = null;
-      for (let r of rectangles) {
-        if (r.type === 'grass' && x >= r.x && x <= r.x + r.w) {
-          if (!highestGrass || r.y < highestGrass.y) {
-            highestGrass = r;
-          }
-        }
-      }
-      return highestGrass;
     }
 
     function isSurfaceOccluded(x, y, excludeRect = null) {
@@ -277,27 +372,11 @@
       return false;
     }
 
-    function hasGrassAbove(rect) {
-      for (let r of rectangles) {
-        if (r === rect) continue;
-        if (r.type !== 'grass') continue;
-        
-        // Simple check: is there any grass block above this one?
-        if (r.y < rect.y && r.y + r.h >= rect.y) {
-          return true;
-        }
-      }
-      return false;
-    }
-
     function isGrassPolyOccluded(x, y, depth, excludeRect = null) {
       for (let r of rectangles) {
         if (r === excludeRect) continue;
         if (r.type !== 'grass') continue;
         if (x >= r.x && x <= r.x + r.w) {
-          // Check if this grass rectangle would occlude the polygon below
-          // The polygon extends from y down to y + depth
-          // If another grass layer is above this polygon's top, it occludes it
           if (r.y < y && r.y + r.h >= y) {
             return true;
           }
@@ -318,7 +397,7 @@
       const minNeededIdx = Math.floor(leftBound / NODE_SPACING);
       const maxNeededIdx = Math.ceil(rightBound / NODE_SPACING);
 
-      const GRASS_EDGE_PADDING = 4; // Keep grass blades away from edges
+      const GRASS_EDGE_PADDING = 4;
 
       grassBladesMap.clear();
       grassBottomNodes = [];
@@ -330,7 +409,6 @@
             if (!isSurfaceOccluded(x, r.y)) {
               grassBottomNodes.push({ idx: idx, x: x, y: r.y, depth: getPolyDepth(idx) });
               
-              // Calculate distance from nearest edge for blade sizing
               const distFromLeft = x - (r.x + GRASS_EDGE_PADDING);
               const distFromRight = (r.x + r.w - GRASS_EDGE_PADDING) - x;
               const edgeDist = Math.min(distFromLeft, distFromRight);
@@ -372,8 +450,6 @@
     }
 
     function drawTerrain(camX, camY = 0) {
-      const maxConnectDist = 6 * GRID_SIZE;
-
       ctx.fillStyle = PALETTE.dirt;
       for (let r of rectangles) {
         if (r.type === 'grass') {
@@ -497,7 +573,7 @@
       ctx.fill();
     }
 
-function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
+    function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
       const dx = targetX - hipX;
       const dy = targetY - hipY;
       let dist = Math.sqrt(dx * dx + dy * dy);
@@ -533,7 +609,7 @@ function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
 
       const innerKneeAngleRad = (125 * Math.PI) / 180;
       const standingLegHeight = 2 * thighLen * Math.sin(innerKneeAngleRad / 2);
-      const crouchLegHeight = standingLegHeight * 0.5; // 50% shorter when crouching
+      const crouchLegHeight = standingLegHeight * 0.5;
       const currentLegHeight = standingLegHeight - p.crouchFactor * (standingLegHeight - crouchLegHeight);
       
       const hipX = screenX;
@@ -556,7 +632,6 @@ function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
           const stride1 = -Math.cos(p.animPhase);
           const stride2 = -Math.cos(p.animPhase + Math.PI);
 
-          // Reduce step length and lift when crouching
           const crouchStepFactor = 1 - p.crouchFactor * 0.5;
           const lift1 = Math.max(0, Math.sin(p.animPhase)) * 15 * crouchStepFactor;
           const lift2 = Math.max(0, Math.sin(p.animPhase + Math.PI)) * 15 * crouchStepFactor;
@@ -573,7 +648,7 @@ function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
           target2Y = groundContactY;
         }
       } else {
-        const isMovingHorizontally = keys.left || keys.right || Math.abs(p.vx) > 0.1;
+        const isMovingHorizontally = (p === player ? (keys.left || keys.right) : false) || Math.abs(p.vx) > 0.1;
         const jumpProgress = Math.min(1, Math.max(0, 1 - Math.abs(p.vy) / 6));
 
         if (isMovingHorizontally) {
@@ -599,7 +674,8 @@ function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
       ctx.save();
       ctx.globalAlpha = 0.50;
 
-      ctx.fillStyle = PALETTE.player;
+      const playerColor = p.color || PALETTE.player;
+      ctx.fillStyle = playerColor;
       ctx.beginPath();
       ctx.arc(headX, headY, headRadius, 0, Math.PI * 2);
       ctx.fill();
@@ -607,7 +683,7 @@ function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
       const ik1 = solveIK(hipX, hipY, p.leg1.x, p.leg1.y, thighLen, shinLen, dir);
       const ik2 = solveIK(hipX, hipY, p.leg2.x, p.leg2.y, thighLen, shinLen, dir);
 
-      ctx.strokeStyle = PALETTE.player;
+      ctx.strokeStyle = playerColor;
       ctx.lineWidth = legWidth;
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
@@ -659,15 +735,15 @@ function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
           pt.alpha -= pt.life;
           if (pt.alpha <= 0) particles.splice(i, 1);
         }
+        sendPlayerState();
         return;
       }
 
-      // Handle smooth crouching
       const targetCrouch = keys.crouch && player.isGrounded ? 1 : 0;
       player.crouchFactor += (targetCrouch - player.crouchFactor) * 0.2;
       player.isCrouching = player.crouchFactor > 0.5;
       
-      const speedMultiplier = 1 - player.crouchFactor * 0.4; // 1.0 when standing, 0.6 when crouching
+      const speedMultiplier = 1 - player.crouchFactor * 0.4;
 
       if (keys.left) {
         player.vx -= player.accel * speedMultiplier;
@@ -698,7 +774,7 @@ function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
       player.vy += player.gravity;
 
       const headRadius = 15;
-      const totalHeight = 54 - player.crouchFactor * 27; // Smoothly interpolate height
+      const totalHeight = 54 - player.crouchFactor * 27;
       const getPlayerBox = (px, py) => ({
         left: px - headRadius,
         right: px + headRadius,
@@ -715,6 +791,7 @@ function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
             player.isAlive = false;
             playCrashSound();
             createExplosion(player.x, player.y - 20);
+            sendPlayerState();
             return;
           }
         } else if (rect.type === 'platform' || rect.type === 'grass') {
@@ -740,6 +817,7 @@ function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
             player.isAlive = false;
             playCrashSound();
             createExplosion(player.x, player.y - 20);
+            sendPlayerState();
             return;
           }
         } else if (rect.type === 'platform' || rect.type === 'grass') {
@@ -775,10 +853,13 @@ function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
       }
 
       const targetCamX = player.x - (width / CAMERA_ZOOM) * 0.5;
+      const targetCamY = player.y - (height / CAMERA_ZOOM) * 0.55;
       cameraX += (targetCamX - cameraX) * 0.08;
+      cameraY += (targetCamY - cameraY) * 0.04;
 
       updateGrassSystem(cameraX);
       distanceMetres = Math.floor(player.x / 100);
+      sendPlayerState();
     }
 
     function renderWorldObjects(camX, camY = 0) {
@@ -827,6 +908,10 @@ function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
         ctx.restore();
       }
 
+      if (remotePlayer && remotePlayer.isAlive) {
+        drawPlayer(remotePlayer, camX, camY);
+      }
+
       if (player.isAlive) {
         drawPlayer(player, camX, camY);
       }
@@ -836,7 +921,7 @@ function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
       ctx.save();
       ctx.scale(CAMERA_ZOOM, CAMERA_ZOOM);
 
-      renderWorldObjects(cameraX, 0);
+      renderWorldObjects(cameraX, cameraY);
 
       ctx.restore();
 
@@ -942,7 +1027,6 @@ function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
         }
       }
 
-      // Draw selection box
       if (isSelecting) {
         const screenStart = worldToScreenEditor(selectionStart.x, selectionStart.y);
         const currentMouse = screenToWorldEditor(lastMouseX, lastMouseY);
@@ -994,28 +1078,29 @@ function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
       minNodeIdx = Infinity;
       maxNodeIdx = -Infinity;
       cameraX = player.x - (width / CAMERA_ZOOM) * 0.5;
+      cameraY = player.y - (height / CAMERA_ZOOM) * 0.5;
       distanceMetres = 0;
 
       updateGrassSystem(cameraX);
     }
 
     let selectedRect = null;
-    let selectedRects = []; // For multi-selection
+    let selectedRects = [];
     let isDragging = false;
     let resizeHandle = null;
     let isPanning = false;
     let dragOffset = { x: 0, y: 0 };
     let panStart = { x: 0, y: 0 };
     let resizeInitial = { x: 0, y: 0, w: 0, h: 0 };
-    let clipboard = null; // For copy/paste
-    let isSelecting = false; // For box selection
+    let clipboard = null;
+    let isSelecting = false;
     let selectionStart = { x: 0, y: 0 };
     let lastMouseX = 0;
     let lastMouseY = 0;
     let undoStack = [];
     let redoStack = [];
-    let dragStartPositions = []; // Store initial positions for group drag
-    let touchStartDist = 0; // For pinch zoom
+    let dragStartPositions = [];
+    let touchStartDist = 0;
     let touchStartZoom = 0;
 
     const modeBtn = document.getElementById('modeBtn');
@@ -1126,19 +1211,15 @@ function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
       if (!isEditor) return;
       e.preventDefault();
       
-      // Check if it's a touchpad (has ctrlKey or small delta values)
       if (e.ctrlKey || (Math.abs(e.deltaY) < 100 && Math.abs(e.deltaX) < 100)) {
-        // Touchpad pinch zoom (ctrl + scroll)
         if (e.ctrlKey) {
           const zoomFactor = e.deltaY < 0 ? 1.05 : 0.95;
           editorZoom = Math.max(0.2, Math.min(4.0, editorZoom * zoomFactor));
         } else if ((e.buttons === 1 || e.buttons === 2) && (Math.abs(e.deltaX) > 10 || Math.abs(e.deltaY) > 10)) {
-          // Touchpad two-finger scroll + mousedown for panning
           editorCamX -= e.deltaX / editorZoom;
           editorCamY -= e.deltaY / editorZoom;
         }
       } else {
-        // Regular mouse wheel for zoom
         const zoomFactor = e.deltaY < 0 ? 1.1 : 0.9;
         editorZoom = Math.max(0.2, Math.min(4.0, editorZoom * zoomFactor));
       }
@@ -1211,7 +1292,6 @@ function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
             return;
           }
         }
-        // Check if clicking on any selected rectangle
         let clickedOnSelected = false;
         for (const rect of selectedRects) {
           if (
@@ -1225,7 +1305,6 @@ function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
           }
         }
         if (clickedOnSelected) {
-          // Start group drag
           isDragging = true;
           dragStartPositions = selectedRects.map(r => ({ x: r.x, y: r.y }));
           dragOffset = { x: mouseWorld.x - selectedRects[0].x, y: mouseWorld.y - selectedRects[0].y };
@@ -1234,13 +1313,11 @@ function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
       }
 
       if (e.shiftKey) {
-        // Multi-selection mode
         isSelecting = true;
         selectionStart = mouseWorld;
         return;
       }
 
-      // Single selection
       selectedRects = [];
       selectedRect = null;
       for (let i = rectangles.length - 1; i >= 0; i--) {
@@ -1302,7 +1379,6 @@ function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
       const mouseWorld = screenToWorldEditor(e.clientX, e.clientY);
 
       if (isSelecting) {
-        // Box selection mode - handled in render
         return;
       }
 
@@ -1344,7 +1420,6 @@ function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
           newY = Math.round(newY / GRID_SIZE) * GRID_SIZE;
         }
 
-        // Calculate movement based on first selected rectangle's initial position
         const deltaX = newX - dragStartPositions[0].x;
         const deltaY = newY - dragStartPositions[0].y;
 
@@ -1365,7 +1440,6 @@ function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
         const minY = Math.min(selectionStart.y, mouseWorld.y);
         const maxY = Math.max(selectionStart.y, mouseWorld.y);
 
-        // Select all rectangles in the box
         selectedRects = [];
         for (const r of rectangles) {
           if (r.x >= minX && r.x + r.w <= maxX && r.y >= minY && r.y + r.h <= maxY) {
@@ -1396,6 +1470,8 @@ function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
     });
 
     window.addEventListener('keydown', (e) => {
+      if (document.activeElement.tagName === 'INPUT') return;
+
       initAudio();
       if (e.key === 'Tab' || e.code === 'Space' || e.key === ' ' || e.code.startsWith('Arrow')) {
         e.preventDefault();
@@ -1405,25 +1481,18 @@ function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
       if (e.code === 'ShiftLeft' || e.code === 'ShiftRight' || e.code === 'ArrowDown' || e.code === 'KeyS') keys.crouch = true;
 
       if (isEditor) {
-        // Undo (Ctrl+Z)
         if ((e.ctrlKey || e.metaKey) && e.code === 'KeyZ') {
           undo();
           e.preventDefault();
         }
-        
-        // Redo (Ctrl+Y)
         if ((e.ctrlKey || e.metaKey) && e.code === 'KeyY') {
           redo();
           e.preventDefault();
         }
-        
-        // Copy (Ctrl+C)
         if ((e.ctrlKey || e.metaKey) && e.code === 'KeyC' && selectedRects.length > 0) {
           clipboard = selectedRects.map(r => ({ ...r }));
           e.preventDefault();
         }
-        
-        // Paste (Ctrl+V)
         if ((e.ctrlKey || e.metaKey) && e.code === 'KeyV' && clipboard) {
           saveEditorState();
           const pastedRects = clipboard.map(r => ({ ...r }));
@@ -1432,8 +1501,6 @@ function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
           selectedRect = pastedRects[0];
           e.preventDefault();
         }
-        
-        // Rotate (R)
         if (e.code === 'KeyR' && selectedRects.length > 0) {
           saveEditorState();
           for (const rect of selectedRects) {
@@ -1443,8 +1510,6 @@ function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
           }
           e.preventDefault();
         }
-        
-        // Delete
         if ((e.code === 'Delete' || e.code === 'Backspace') && selectedRects.length > 0) {
           saveEditorState();
           rectangles = rectangles.filter(r => !selectedRects.includes(r));
@@ -1464,6 +1529,8 @@ function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
     });
 
     window.addEventListener('keyup', (e) => {
+      if (document.activeElement.tagName === 'INPUT') return;
+
       if (e.key === 'Shift') keys.shift = false;
       if (e.code === 'ShiftLeft' || e.code === 'ShiftRight' || e.code === 'ArrowDown' || e.code === 'KeyS') keys.crouch = false;
       if (e.code === 'KeyA' || e.code === 'ArrowLeft') keys.left = false;
@@ -1494,13 +1561,11 @@ function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
       keys.jump = false;
     });
 
-    // Touch support for editor
     canvas.addEventListener('touchstart', (e) => {
       if (!isEditor) return;
       e.preventDefault();
       
       if (e.touches.length === 2) {
-        // Two-finger pinch for zoom
         touchStartDist = Math.hypot(
           e.touches[0].clientX - e.touches[1].clientX,
           e.touches[0].clientY - e.touches[1].clientY
@@ -1531,7 +1596,6 @@ function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
               return;
             }
           }
-          // Check if clicking on any selected rectangle
           let clickedOnSelected = false;
           for (const rect of selectedRects) {
             if (
@@ -1552,7 +1616,6 @@ function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
           }
         }
 
-        // Single selection
         selectedRects = [];
         selectedRect = null;
         for (let i = rectangles.length - 1; i >= 0; i--) {
@@ -1603,7 +1666,6 @@ function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
       e.preventDefault();
       
       if (e.touches.length === 2) {
-        // Two-finger pinch for zoom
         const currentDist = Math.hypot(
           e.touches[0].clientX - e.touches[1].clientX,
           e.touches[0].clientY - e.touches[1].clientY
@@ -1611,7 +1673,6 @@ function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
         const zoomFactor = currentDist / touchStartDist;
         editorZoom = Math.max(0.2, Math.min(4.0, touchStartZoom * zoomFactor));
         
-        // Two-finger pan
         const currentPanX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
         const currentPanY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
         editorCamX -= (currentPanX - panStart.x) / editorZoom;
@@ -1685,8 +1746,8 @@ function solveIK(hipX, hipY, targetX, targetY, thighLen, shinLen, direction) {
       isPanning = false;
     });
 
-    window.onload = function () {
-      loadDefaultLevel();
+    window.onload = async function () {
+      await loadDefaultLevel();
       restartGame();
       gameLoop();
     };
