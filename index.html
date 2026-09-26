@@ -113,8 +113,7 @@
         platform: '#723838',
         platformShadow: 'rgba(0, 0, 0, 0.2)',
         bolt: '#4a4a4a',
-        player: '#ffffff',
-        remotePlayer: '#e74c3c'
+        player: '#ffffff'
     };
 
     const CAMERA_ZOOM = 1.5;
@@ -169,7 +168,7 @@
     }
 
     let grassBladesMap = new Map();
-    let grassBottomNodes = [];
+    let grassRunsByRect = new Map();
     let minNodeIdx = Infinity;
     let maxNodeIdx = -Infinity;
     let time = 0;
@@ -240,136 +239,425 @@
       rotation: 0 // Rotation angle in radians
     };
 
-    let remotePlayer = null;
-
     // --- PeerJS Networking Integration ---
+    // Star topology: the host owns the room, hands out a colour slot to every
+    // peer and relays each peer's messages to the other peers, so all clients
+    // see all players. Peers never talk to each other directly.
+    const MAX_PLAYERS = 4;
+    const PLAYER_COLORS = [
+      { hex: '#ffffff', name: 'White' },
+      { hex: '#e74c3c', name: 'Red' },
+      { hex: '#055c96', name: 'Blue' },
+      { hex: '#f1c40f', name: 'Yellow' }
+    ];
+    const STATE_SEND_INTERVAL = 33; // ms between player state snapshots (~30Hz)
+    const LEVEL_SYNC_INTERVAL = 50; // ms between level snapshots while dragging
+
     let peer = null;
-    let conn = null;
+    let pendingPeer = null; // instance still negotiating its room code
+    let netRole = null; // 'host' | 'guest'
+    let isHost = false;
+    let localPeerId = null;
+    let localSlot = 0;
+    let pendingJoinId = null;
+    let roster = [];
+    const connections = new Map(); // peerId -> { conn, slot, stale }
+    const remotePlayers = new Map(); // peerId -> remote state
 
-    function initPeerJS() {
-      if (peer) return;
+    function colorIndex(slot) {
+      if (!Number.isInteger(slot)) return 0;
+      return ((slot % MAX_PLAYERS) + MAX_PLAYERS) % MAX_PLAYERS;
+    }
 
-      // Generate a 6-digit PIN
+    function getPlayerColor(slot) {
+      return PLAYER_COLORS[colorIndex(slot)].hex;
+    }
+
+    function createPeer() {
       const pin = Math.floor(100000 + Math.random() * 900000).toString();
-
-      peer = new Peer(pin, {
+      const p = new Peer(pin, {
         config: {
           iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
         }
       });
+      pendingPeer = p;
 
-      peer.on('open', (id) => {
-        console.log('PeerJS PIN:', id);
+      p.on('open', (id) => {
+        peer = p;
+        pendingPeer = null;
+        localPeerId = id;
+
+        if (netRole === 'guest' && pendingJoinId) {
+          const hostId = pendingJoinId;
+          pendingJoinId = null;
+          connectToHost(hostId);
+        } else {
+          becomeHost();
+        }
       });
 
-      peer.on('connection', (connection) => {
-        conn = connection;
-        setupConnection();
+      p.on('connection', (conn) => {
+        conn.on('open', () => acceptPeer(conn));
       });
+
+      p.on('disconnected', () => {
+        console.warn('Lost signalling server, retrying...');
+        try { p.reconnect(); } catch (e) {}
+      });
+
+      p.on('error', (err) => {
+        // A taken PIN just means a colliding room code was drawn: try again.
+        if (err.type === 'unavailable-id' && !isHost) {
+          pendingPeer = null;
+          createPeer();
+          return;
+        }
+        if (err.type === 'peer-unavailable') {
+          alert('No room with that ID');
+          return;
+        }
+        if (err.type === 'network') {
+          alert('Network error, check your connection');
+          return;
+        }
+        alert(`Network error: ${err.type || err.message}`);
+      });
+
+      return p;
     }
 
-    function setupConnection() {
-      conn.on('open', () => {
-        console.log('Peer Connected!');
-        sendLevelSync();
-        sendPlayerState();
-      });
+    function ensurePeer() {
+      if (peer && !peer.destroyed) return peer;
+      if (pendingPeer) return pendingPeer;
+      return createPeer();
+    }
 
-      conn.on('data', (data) => {
-        if (data.type === 'levelSync') {
+    function becomeHost() {
+      isHost = true;
+      localSlot = 0;
+      applyLocalColor();
+      applyRoster([{ id: localPeerId, slot: 0 }]);
+      peerIdInput.value = localPeerId;
+      if (navigator.clipboard) navigator.clipboard.writeText(localPeerId).catch(() => {});
+    }
+
+    // Host side: claim a colour slot for an incoming peer, or turn it away
+    // once the room is full.
+    function acceptPeer(conn) {
+      if (!isHost) {
+        conn.close();
+        return;
+      }
+
+      if (connections.size + 1 > MAX_PLAYERS) {
+        sendTo(conn, { type: 'roomFull', max: MAX_PLAYERS });
+        setTimeout(() => conn.close(), 200);
+        console.warn(`Room full (${MAX_PLAYERS}/${MAX_PLAYERS}), rejected ${conn.peer}`);
+        return;
+      }
+
+      const slot = nextFreeSlot();
+      connections.set(conn.peer, { conn, slot, stale: false });
+      attachConnectionHandlers(conn, conn.peer, slot);
+
+      sendTo(conn, {
+        type: 'welcome',
+        slot,
+        players: buildRoster(),
+        rectangles
+      });
+      broadcastRoster();
+    }
+
+    // Guest side: dial the host. Delivery stays reliable because level syncs
+    // and death events cannot be dropped; player state is throttled instead.
+    function connectToHost(hostId) {
+      // A previous session to the same host may still be cached by PeerJS.
+      const stale = peer.connections && peer.connections[hostId];
+      if (stale) {
+        try { stale.close(); } catch (e) {}
+      }
+
+      const conn = peer.connect(hostId, { reliable: true });
+      connections.set(hostId, { conn, slot: 0, stale: false });
+      attachConnectionHandlers(conn, hostId, 0);
+    }
+
+    function attachConnectionHandlers(conn, id) {
+      conn.on('data', (data) => handlePeerData(id, data));
+      conn.on('close', () => handlePeerClose(id));
+      conn.on('error', (err) => console.warn('Connection error:', err && err.type));
+    }
+
+    function handlePeerData(connId, data) {
+      if (!data || typeof data !== 'object') return;
+
+      if (data.type === 'roomFull') {
+        resetNetState();
+        alert(`Room is full (${data.max || MAX_PLAYERS} players)`);
+        return;
+      }
+
+      if (isHost && data.from === localPeerId) return;
+
+      switch (data.type) {
+        case 'welcome':
+          localSlot = data.slot;
+          applyLocalColor();
+          applyRoster(data.players);
+          if (data.rectangles) syncLevelFromRemote(data.rectangles);
+          sendPlayerState(true);
+          break;
+        case 'roster':
+          applyRoster(data.players);
+          break;
+        case 'levelSync':
           syncLevelFromRemote(data.rectangles);
-        } else if (data.type === 'death') {
-          createExplosion(data.x, data.y, PALETTE.remotePlayer);
-          playCrashSound();
-        } else if (data.type === 'playerState' || data.x !== undefined) {
-          if (!remotePlayer) {
-            remotePlayer = {
-              x: data.x, y: data.y, vx: data.vx, vy: data.vy,
-              facing: data.facing, animPhase: data.animPhase,
-              isGrounded: data.isGrounded, crouchFactor: data.crouchFactor,
-              rotation: data.rotation || 0,
-              isAlive: data.isAlive, color: PALETTE.remotePlayer,
-              isEditor: data.isEditor,
-              cursorX: data.cursorX, cursorY: data.cursorY,
-              leg1: { x: data.x, y: data.y }, leg2: { x: data.x, y: data.y }
-            };
-          } else {
-            Object.assign(remotePlayer, data);
-          }
+          if (isHost) broadcast(data, connId);
+          break;
+        case 'playerState':
+        case 'death':
+          // Identity is the original sender, not the connection the packet
+          // arrived on: everything the host relays reaches a guest over the
+          // host's own connection, so keying by connId would collapse every
+          // remote player into one entry that flickers between senders.
+          applyRemoteMessage(data.from || connId, data);
+          if (isHost) broadcast(data, connId);
+          break;
+      }
+    }
+
+    function applyRemoteMessage(playerId, data) {
+      let rp = remotePlayers.get(playerId);
+      if (!rp) {
+        rp = {
+          x: data.x, y: data.y, vx: data.vx, vy: data.vy,
+          facing: data.facing, animPhase: data.animPhase,
+          isGrounded: data.isGrounded, crouchFactor: data.crouchFactor,
+          rotation: data.rotation || 0,
+          isAlive: data.isAlive !== false,
+          isEditor: !!data.isEditor,
+          cursorX: data.cursorX, cursorY: data.cursorY,
+          dist: data.dist || 0,
+          slot: colorIndex(data.slot),
+          leg1: { x: data.x, y: data.y },
+          leg2: { x: data.x, y: data.y }
+        };
+        remotePlayers.set(playerId, rp);
+      } else {
+        Object.assign(rp, data);
+      }
+
+      // Colour follows the slot the host handed out, not the wire payload.
+      rp.slot = colorIndex(data.slot !== undefined ? data.slot : rp.slot);
+      rp.color = getPlayerColor(rp.slot);
+
+      if (data.type === 'death') {
+        createExplosion(data.x, data.y, rp.color);
+        playCrashSound();
+      }
+    }
+
+    function handlePeerClose(id) {
+      const entry = connections.get(id);
+      if (entry && entry.stale) {
+        connections.delete(id);
+        return;
+      }
+
+      connections.delete(id);
+      remotePlayers.delete(id);
+
+      if (isHost) {
+        broadcastRoster();
+      } else {
+        resetNetState();
+        alert('Disconnected from host');
+      }
+    }
+
+    function resetNetState() {
+      connections.forEach((entry) => {
+        entry.stale = true;
+        try { entry.conn.close(); } catch (e) {}
+      });
+      connections.clear();
+      remotePlayers.clear();
+      isHost = false;
+      netRole = null;
+      localSlot = 0;
+      applyLocalColor();
+      applyRoster([]);
+    }
+
+    function nextFreeSlot() {
+      const used = new Set([0]);
+      connections.forEach((entry) => used.add(entry.slot));
+      for (let i = 1; i < MAX_PLAYERS; i++) {
+        if (!used.has(i)) return i;
+      }
+      return -1;
+    }
+
+    function buildRoster() {
+      const list = [{ id: localPeerId, slot: 0 }];
+      connections.forEach((entry, id) => list.push({ id, slot: entry.slot }));
+      return list;
+    }
+
+    function broadcastRoster() {
+      const players = buildRoster();
+      broadcast({ type: 'roster', players });
+      applyRoster(players);
+    }
+
+    function applyRoster(players) {
+      roster = Array.isArray(players) ? players : [];
+
+      // Drop anyone the host no longer lists, otherwise their last known
+      // position would stay on screen as a frozen ghost.
+      const present = new Set(roster.map(entry => entry.id));
+      for (const id of remotePlayers.keys()) {
+        if (!present.has(id)) remotePlayers.delete(id);
+      }
+
+      for (const entry of roster) {
+        const rp = remotePlayers.get(entry.id);
+        if (rp) {
+          rp.slot = entry.slot;
+          rp.color = getPlayerColor(entry.slot);
         }
+      }
+    }
+
+    function sendTo(conn, msg) {
+      if (!conn || !conn.open) return;
+      try {
+        conn.send(msg);
+      } catch (err) {
+        console.warn('Failed to send:', err && err.message);
+      }
+    }
+
+    function broadcast(msg, exceptId) {
+      connections.forEach((entry, id) => {
+        if (id === exceptId) return;
+        sendTo(entry.conn, msg);
       });
     }
 
     document.getElementById('hostBtn').onclick = () => {
-      initPeerJS();
-      peer.on('open', (id) => {
-        navigator.clipboard.writeText(id).catch(() => {});
-        prompt('Hosting! Share this Peer ID with your friend:', id);
-      });
-    };
-
-    document.getElementById('joinBtn').onclick = () => {
-      initPeerJS();
-      const hostId = document.getElementById('peerIdInput').value || prompt('Enter Host Peer ID:');
-      if (!hostId) return;
-
-      peer.on('open', () => {
-        conn = peer.connect(hostId, { reliable: true });
-        setupConnection();
-      });
-    };
-
-    function sendPlayerState() {
-      if (conn && conn.open) {
-        const mouseWorld = getCurrentMouseWorld();
-        conn.send({
-          type: 'playerState',
-          x: player.x,
-          y: player.y,
-          vx: player.vx,
-          vy: player.vy,
-          facing: player.facing,
-          animPhase: player.animPhase,
-          isGrounded: player.isGrounded,
-          crouchFactor: player.crouchFactor,
-          rotation: player.rotation,
-          isAlive: player.isAlive,
-          isEditor: isEditor,
-          cursorX: mouseWorld.x,
-          cursorY: mouseWorld.y
-        });
+      if (isHost) {
+        becomeHost();
+        return;
       }
+      resetNetState();
+      netRole = 'host';
+      pendingJoinId = null;
+      if (peer && !peer.destroyed && peer.open) {
+        becomeHost();
+      } else {
+        ensurePeer();
+      }
+    };
+
+    const peerIdInput = document.getElementById('peerIdInput');
+
+    function joinRoom() {
+      const hostId = peerIdInput.value.trim();
+      if (!hostId) {
+        alert('Enter a host ID first');
+        peerIdInput.focus();
+        return;
+      }
+      resetNetState();
+      netRole = 'guest';
+      if (peer && !peer.destroyed && peer.open) {
+        connectToHost(hostId);
+      } else {
+        pendingJoinId = hostId;
+        ensurePeer();
+      }
+      peerIdInput.blur();
     }
 
+    document.getElementById('joinBtn').onclick = joinRoom;
+
+    peerIdInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') joinRoom();
+    });
+
+    // Room codes are digits, so pasted text settles into something dialable.
+    peerIdInput.addEventListener('input', () => {
+      peerIdInput.value = peerIdInput.value.replace(/\D/g, '');
+    });
+
+    let lastStateSend = -Infinity;
+    function sendPlayerState(force) {
+      if (connections.size === 0) return;
+
+      const now = performance.now();
+      if (!force && now - lastStateSend < STATE_SEND_INTERVAL) return;
+      lastStateSend = now;
+
+      const mouseWorld = getCurrentMouseWorld();
+      broadcast({
+        type: 'playerState',
+        from: localPeerId,
+        slot: localSlot,
+        x: player.x,
+        y: player.y,
+        vx: player.vx,
+        vy: player.vy,
+        facing: player.facing,
+        animPhase: player.animPhase,
+        isGrounded: player.isGrounded,
+        crouchFactor: player.crouchFactor,
+        rotation: player.rotation,
+        isAlive: player.isAlive,
+        isEditor: isEditor,
+        dist: distanceMetres,
+        cursorX: mouseWorld.x,
+        cursorY: mouseWorld.y
+      });
+    }
+
+    let levelSyncQueued = false;
     function sendLevelSync() {
-      if (conn && conn.open) {
-        conn.send({
+      if (connections.size === 0 || levelSyncQueued) return;
+      levelSyncQueued = true;
+      // Editor edits fire on every pointer move while dragging, coalesce them.
+      setTimeout(() => {
+        levelSyncQueued = false;
+        broadcast({
           type: 'levelSync',
-          rectangles: rectangles
+          from: localPeerId,
+          rectangles
         });
-      }
+      }, LEVEL_SYNC_INTERVAL);
     }
 
     function syncLevelFromRemote(newRects) {
       const selectedIndices = selectedRects.map(r => rectangles.indexOf(r)).filter(i => i !== -1);
       rectangles = newRects;
-      selectedRects = selectedIndices.map(i => rectangles[i]).filter(i => i < rectangles.length && rectangles[i]);
+      selectedIndices = selectedIndices.map(i => rectangles[i]).filter(i => i < rectangles.length && rectangles[i]);
       selectedRect = selectedRects.length > 0 ? selectedRects[0] : null;
     }
 
     function sendDeathEvent(x, y) {
-      if (conn && conn.open) {
-        conn.send({
-          type: 'death',
-          x: x,
-          y: y
-        });
-      }
+      if (connections.size === 0) return;
+      broadcast({
+        type: 'death',
+        from: localPeerId,
+        slot: localSlot,
+        x: x,
+        y: y
+      });
     }
 
     let particles = [];
     let distanceMetres = 0;
-    const keys = { left: false, right: false, jump: false, shift: false, crouch: false, rotateLeft: false, rotateRight: false };
+    const keys = { left: false, right: false, jump: false, shift: false, crouch: false };
 
     function resize() {
       const dpr = window.devicePixelRatio || 1;
@@ -408,29 +696,94 @@
       };
     }
 
-    function isSurfaceOccluded(x, y, excludeRect = null) {
-      for (let r of rectangles) {
-        if (r === excludeRect) continue;
-        if (x >= r.x && x <= r.x + r.w) {
-          if (r.y < y && r.y + r.h >= y - 1) {
-            return true;
-          }
+    // Depths (in rect local space, measured from the top surface downwards) that
+    // are probed to find out whether a grass surface is buried under other grass.
+    // Depths at or above the surface line catch a block resting on this one, so
+    // its grass is hidden without the block having to overlap. The rest stay
+    // inside the band the surface fill actually covers: probing deeper made a
+    // grass platform standing on the ground read the ground as its cover, which
+    // culled its whole grass layer.
+    const GRASS_OCCLUSION_PROBES = [-6, 0, 8, 20, 44];
+
+    function getGrassOcclusionProbes(rect) {
+      const probes = [];
+      for (let depth of GRASS_OCCLUSION_PROBES) {
+        if (depth <= 0) {
+          probes.push(depth);
+          continue;
+        }
+        const clamped = Math.min(depth, rect.h - 1);
+        if (clamped <= 0) break;
+        if (probes.length > 0 && clamped <= probes[probes.length - 1]) break;
+        probes.push(clamped);
+      }
+      return probes;
+    }
+
+    function isGrassEdgeOccluded(rect, localX) {
+      const probes = getGrassOcclusionProbes(rect);
+
+      for (let other of rectangles) {
+        if (other === rect) continue;
+        if (other.type !== 'grass') continue;
+        for (let depth of probes) {
+          const p = rectToWorld(rect, localX, depth);
+          if (pointInRect(other, p.x, p.y)) return true;
         }
       }
       return false;
     }
 
-    function isGrassPolyOccluded(x, y, depth, excludeRect = null) {
-      for (let r of rectangles) {
-        if (r === excludeRect) continue;
-        if (r.type !== 'grass') continue;
-        if (x >= r.x && x <= r.x + r.w) {
-          if (r.y < y && r.y + r.h >= y) {
-            return true;
-          }
+    const GRASS_RUN_BISECT_STEPS = 6;
+
+    // Bisects between a visible surface spot and an occluded one so ground
+    // fills stop at the covering rect instead of at the node grid.
+    function refineGrassRunEdge(rect, visibleLocalX, occludedLocalX) {
+      let lo = visibleLocalX;
+      let hi = occludedLocalX;
+      for (let i = 0; i < GRASS_RUN_BISECT_STEPS; i++) {
+        const mid = (lo + hi) / 2;
+        if (isGrassEdgeOccluded(rect, mid)) hi = mid;
+        else lo = mid;
+      }
+      return (lo + hi) / 2;
+    }
+
+    // Splits a rect's surface nodes into runs of contiguous, visible surface.
+    function buildGrassRuns(rect, nodes) {
+      const runs = [];
+      let current = [nodes[0]];
+
+      for (let i = 1; i < nodes.length; i++) {
+        if (Math.abs(nodes[i].localX - current[current.length - 1].localX - NODE_SPACING) < 0.001) {
+          current.push(nodes[i]);
+        } else {
+          runs.push(current);
+          current = [nodes[i]];
         }
       }
-      return false;
+      runs.push(current);
+
+      return runs.map((run, runIndex) => {
+        let startLocalX = run[0].localX;
+        let endLocalX = run[run.length - 1].localX;
+
+        if (runIndex === 0) {
+          const prevLocalX = startLocalX - NODE_SPACING;
+          startLocalX = (prevLocalX < 0 || !isGrassEdgeOccluded(rect, prevLocalX))
+            ? 0
+            : refineGrassRunEdge(rect, startLocalX, prevLocalX);
+        }
+
+        if (runIndex === runs.length - 1) {
+          const nextLocalX = endLocalX + NODE_SPACING;
+          endLocalX = (nextLocalX > rect.w || !isGrassEdgeOccluded(rect, nextLocalX))
+            ? rect.w
+            : refineGrassRunEdge(rect, endLocalX, nextLocalX);
+        }
+
+        return { startLocalX, endLocalX, nodes: run };
+      });
     }
 
     function updateGrassSystem(activeCamX) {
@@ -442,41 +795,53 @@
       const leftBound = curCamX - 1000;
       const rightBound = curCamX + viewWidth + 1000;
 
-      const minNeededIdx = Math.floor(leftBound / NODE_SPACING);
-      const maxNeededIdx = Math.ceil(rightBound / NODE_SPACING);
-
       const GRASS_EDGE_PADDING = 4;
 
       grassBladesMap.clear();
-      grassBottomNodes = [];
+      grassRunsByRect.clear();
 
-      for (let idx = minNeededIdx; idx <= maxNeededIdx; idx++) {
-        const x = idx * NODE_SPACING;
-        for (let r of rectangles) {
-          if (r.type === 'grass' && x >= r.x + GRASS_EDGE_PADDING && x <= r.x + r.w - GRASS_EDGE_PADDING) {
-            if (!isSurfaceOccluded(x, r.y)) {
-              grassBottomNodes.push({ idx: idx, x: x, y: r.y, depth: getPolyDepth(idx) });
-              
-              const distFromLeft = x - (r.x + GRASS_EDGE_PADDING);
-              const distFromRight = (r.x + r.w - GRASS_EDGE_PADDING) - x;
-              const edgeDist = Math.min(distFromLeft, distFromRight);
-              
-              const props = getBladeProps(idx, edgeDist);
-              const bladeX = x + props.offX;
-              if (!isSurfaceOccluded(bladeX, r.y)) {
-                grassBladesMap.set(`${idx}_${r.y}`, {
-                  idx: idx,
-                  x: bladeX,
-                  y: r.y,
-                  width: props.width,
-                  height: props.height,
-                  lean: props.lean,
-                  deflection: 0
-                });
-              }
-            }
-          }
+      for (let rectIdx = 0; rectIdx < rectangles.length; rectIdx++) {
+        const r = rectangles[rectIdx];
+        if (r.type !== 'grass') continue;
+
+        const rot = getRectRotation(r);
+        const nodes = [];
+
+        for (let localX = GRASS_EDGE_PADDING; localX <= r.w - GRASS_EDGE_PADDING; localX += NODE_SPACING) {
+          const surface = rectToWorld(r, localX, 0);
+          if (surface.x < leftBound || surface.x > rightBound) continue;
+          if (isGrassEdgeOccluded(r, localX)) continue;
+
+          const idx = Math.round(surface.x / NODE_SPACING);
+          const depth = getPolyDepth(idx);
+          nodes.push({ idx, localX, x: surface.x, y: surface.y, depth, rot });
+
+          const edgeDist = Math.min(localX - GRASS_EDGE_PADDING, (r.w - GRASS_EDGE_PADDING) - localX);
+          const props = getBladeProps(idx, edgeDist);
+          const bladeLocalX = localX + props.offX;
+
+          // Skip blades that would hang off the block instead of clipping them.
+          const halfWidth = props.width / 2;
+          if (bladeLocalX - halfWidth < 0 || bladeLocalX + halfWidth > r.w) continue;
+          if (isGrassEdgeOccluded(r, bladeLocalX)) continue;
+
+          const bladeSurface = rectToWorld(r, bladeLocalX, 0);
+          grassBladesMap.set(`${rectIdx}_${idx}`, {
+            idx,
+            rect: r,
+            localX: bladeLocalX,
+            x: bladeSurface.x,
+            y: bladeSurface.y,
+            rotation: rot,
+            width: props.width,
+            height: props.height,
+            lean: props.lean,
+            deflection: 0
+          });
         }
+
+        if (nodes.length === 0) continue;
+        grassRunsByRect.set(r, buildGrassRuns(r, nodes));
       }
 
       for (let blade of grassBladesMap.values()) {
@@ -501,7 +866,10 @@
       ctx.fillStyle = PALETTE.dirt;
       for (let r of rectangles) {
         if (r.type === 'grass') {
-          ctx.fillRect(r.x - camX, r.y - camY, r.w, r.h);
+          ctx.save();
+          setRectCanvasTransform(r, camX, camY);
+          ctx.fillRect(0, 0, r.w, r.h);
+          ctx.restore();
         }
       }
 
@@ -509,75 +877,30 @@
       for (let r of rectangles) {
         if (r.type !== 'grass') continue;
 
-        const nodesInRect = grassBottomNodes.filter(n => n.x >= r.x && n.x <= r.x + r.w && n.y === r.y);
+        const runs = grassRunsByRect.get(r);
+        if (!runs) continue;
 
-        let maxDepth = 0;
-        if (nodesInRect.length > 0) {
-          for (let n of nodesInRect) {
-            maxDepth = Math.max(maxDepth, n.depth);
-          }
-        } else {
-          const midIdx = Math.floor((r.x + r.w / 2) / NODE_SPACING);
-          maxDepth = getPolyDepth(midIdx);
-        }
+        ctx.save();
+        setRectCanvasTransform(r, camX, camY);
 
-        const coveredRanges = [];
-        for (let other of rectangles) {
-          if (other === r) continue;
-          if (other.type !== 'grass') continue;
-          if (other.y < r.y && other.y + other.h >= r.y) {
-            const overlapStart = Math.max(r.x, other.x);
-            const overlapEnd = Math.min(r.x + r.w, other.x + other.w);
-            if (overlapStart < overlapEnd) {
-              coveredRanges.push({ start: overlapStart, end: overlapEnd });
-            }
-          }
-        }
-
-        coveredRanges.sort((a, b) => a.start - b.start);
-        const mergedRanges = [];
-        for (const range of coveredRanges) {
-          if (mergedRanges.length === 0 || range.start > mergedRanges[mergedRanges.length - 1].end) {
-            mergedRanges.push({ ...range });
-          } else {
-            mergedRanges[mergedRanges.length - 1].end = Math.max(mergedRanges[mergedRanges.length - 1].end, range.end);
-          }
-        }
-
-        const uncoveredSections = [];
-        let currentX = r.x;
-        for (const range of mergedRanges) {
-          if (currentX < range.start) {
-            uncoveredSections.push({ start: currentX, end: range.start });
-          }
-          currentX = Math.max(currentX, range.end);
-        }
-        if (currentX < r.x + r.w) {
-          uncoveredSections.push({ start: currentX, end: r.x + r.w });
-        }
-
-        for (const section of uncoveredSections) {
-          const sectionNodes = nodesInRect
-            .filter(n => n.x >= section.start && n.x <= section.end)
-            .sort((a, b) => a.x - b.x);
+        for (const run of runs) {
+          const runNodes = run.nodes;
+          const firstDepth = runNodes[0].depth;
+          const lastDepth = runNodes[runNodes.length - 1].depth;
 
           ctx.beginPath();
-          ctx.moveTo(section.start - camX, r.y - camY);
-
-          let firstDepth = sectionNodes.length > 0 ? sectionNodes[0].depth : getPolyDepth(Math.floor(section.start / NODE_SPACING));
-          let lastDepth = sectionNodes.length > 0 ? sectionNodes[sectionNodes.length - 1].depth : firstDepth;
-
-          ctx.lineTo(section.start - camX, r.y + firstDepth - camY);
-
-          for (let n of sectionNodes) {
-            ctx.lineTo(n.x - camX, r.y + n.depth - camY);
+          ctx.moveTo(run.startLocalX, 0);
+          ctx.lineTo(run.startLocalX, firstDepth);
+          for (let n of runNodes) {
+            ctx.lineTo(n.localX, n.depth);
           }
-
-          ctx.lineTo(section.end - camX, r.y + lastDepth - camY);
-          ctx.lineTo(section.end - camX, r.y - camY);
+          ctx.lineTo(run.endLocalX, lastDepth);
+          ctx.lineTo(run.endLocalX, 0);
           ctx.closePath();
           ctx.fill();
         }
+
+        ctx.restore();
       }
     }
 
@@ -586,22 +909,23 @@
       ctx.fillStyle = PALETTE.ground;
 
       for (let blade of grassBladesMap.values()) {
-        const screenX = blade.x - camX;
-
         const halfWidth = blade.width / 2;
-        const baseLeftX = screenX - halfWidth;
-        const baseRightX = screenX + halfWidth;
+        const baseY = 1.5;
+        const tipX = blade.lean + windForce + blade.deflection;
+        const tipY = -blade.height;
 
-        const tipX = screenX + blade.lean + windForce + blade.deflection;
-        const tipY = (blade.y - blade.height) - camY;
-        const renderBaseY = (blade.y + 1.5) - camY;
+        ctx.save();
+        ctx.translate(blade.x - camX, (blade.y + baseY) - camY);
+        if (blade.rotation !== 0) ctx.rotate(blade.rotation);
 
         ctx.beginPath();
-        ctx.moveTo(baseLeftX, renderBaseY);
-        ctx.quadraticCurveTo(screenX - halfWidth * 0.5, (blade.y - blade.height * 0.5) - camY, tipX, tipY);
-        ctx.quadraticCurveTo(screenX + halfWidth * 0.5, (blade.y - blade.height * 0.5) - camY, baseRightX, renderBaseY);
+        ctx.moveTo(-halfWidth, 0);
+        ctx.quadraticCurveTo(-halfWidth * 0.5, -blade.height * 0.5, tipX, tipY);
+        ctx.quadraticCurveTo(halfWidth * 0.5, -blade.height * 0.5, halfWidth, 0);
         ctx.closePath();
         ctx.fill();
+
+        ctx.restore();
       }
     }
 
@@ -717,7 +1041,8 @@
       p.leg2.y += (target2Y - p.leg2.y) * 0.35;
 
       ctx.save();
-      ctx.globalAlpha = 0.50;
+      // Your own runner stays solid so you can pick yourself out of a crowd.
+      ctx.globalAlpha = p === player ? 0.75 : 0.45;
 
       // Apply rotation
       const rotation = p.rotation || 0;
@@ -773,9 +1098,9 @@
       }
     }
 
-    function drawCursorAtScreenPos(sx, sy, isEditorMode) {
+    function drawCursorAtScreenPos(sx, sy, isEditorMode, color = PALETTE.player, label = 'Peer') {
       ctx.save();
-      ctx.fillStyle = PALETTE.remotePlayer;
+      ctx.fillStyle = color;
       ctx.strokeStyle = '#ffffff';
       ctx.lineWidth = 1.5;
       
@@ -795,8 +1120,20 @@
       ctx.font = '11px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
       ctx.shadowColor = 'rgba(0,0,0,0.8)';
       ctx.shadowBlur = 4;
-      ctx.fillText(isEditorMode ? 'Peer (Editor)' : 'Peer', sx + 14, sy + 14);
+      ctx.fillText(isEditorMode ? `${label} (Editor)` : label, sx + 14, sy + 14);
       ctx.restore();
+    }
+
+    function drawRemotePlayer(rp, camX, camY = 0) {
+      if (!rp.isAlive || rp.isEditor || rp.cursorX === undefined) return;
+      drawPlayer(rp, camX, camY);
+    }
+
+    function drawRemoteCursor(rp, camX, camY = 0) {
+      if (rp.cursorX === undefined) return;
+      const sx = (rp.cursorX - camX) * CAMERA_ZOOM;
+      const sy = (rp.cursorY - camY) * CAMERA_ZOOM;
+      drawCursorAtScreenPos(sx, sy, rp.isEditor, rp.color, `Player ${rp.slot + 1}`);
     }
 
     function update() {
@@ -825,15 +1162,7 @@
       const targetCrouch = keys.crouch && player.isGrounded ? 1 : 0;
       player.crouchFactor += (targetCrouch - player.crouchFactor) * 0.2;
       player.isCrouching = player.crouchFactor > 0.5;
-      
-      // Handle rotation
-      if (keys.rotateLeft) {
-        player.rotation -= 0.08;
-      }
-      if (keys.rotateRight) {
-        player.rotation += 0.08;
-      }
-      
+
       const speedMultiplier = 1 - player.crouchFactor * 0.4;
 
       if (keys.left) {
@@ -866,67 +1195,83 @@
 
       const headRadius = 15;
       const totalHeight = 54 - player.crouchFactor * 27;
-      const getPlayerBox = (px, py) => ({
-        left: px - headRadius,
-        right: px + headRadius,
-        top: py - totalHeight - headRadius * 2,
-        bottom: py
-      });
 
       player.x += player.vx;
-      let box = getPlayerBox(player.x, player.y);
+      let box = getPlayerBox(player.x, player.y, totalHeight);
 
       for (let rect of rectangles) {
         if (rect.type === 'obstacle') {
-          if (box.right > rect.x && box.left < rect.x + rect.w && box.bottom > rect.y && box.top < rect.y + rect.h) {
+          if (overlapsRectSpace(rect, box)) {
             player.isAlive = false;
             playCrashSound();
             const deathY = player.y - 20;
-            createExplosion(player.x, deathY);
+            createExplosion(player.x, deathY, player.color);
             sendDeathEvent(player.x, deathY);
             sendPlayerState();
             return;
           }
         } else if (rect.type === 'platform' || rect.type === 'grass') {
-          if (box.bottom > rect.y + 2 && box.top < rect.y + rect.h - 2) {
-            if (player.vx > 0 && box.right > rect.x && box.left < rect.x) {
-              player.x = rect.x - headRadius;
+          const local = getBoxInRectSpace(rect, box);
+          const halfW = rect.w / 2;
+          const halfH = rect.h / 2;
+          const feetLocalY = worldToRect(rect, player.x, player.y).y - halfH;
+          // The feet have to be beside the face rather than resting on the
+          // surface, otherwise walking along a rotated surface would push the
+          // player off it at the far end.
+          if (feetLocalY > 2 && local.y - local.halfH < halfH - 2) {
+            if (player.vx > 0 && local.x + local.halfW > -halfW && local.x - local.halfW < -halfW) {
+              movePlayerToRectLocalX(rect, -halfW - headRadius);
               player.vx = 0;
-            } else if (player.vx < 0 && box.left < rect.x + rect.w && box.right > rect.x + rect.w) {
-              player.x = rect.x + rect.w + headRadius;
+            } else if (player.vx < 0 && local.x - local.halfW < halfW && local.x + local.halfW > halfW) {
+              movePlayerToRectLocalX(rect, halfW + headRadius);
               player.vx = 0;
             }
           }
         }
       }
 
+      const prevY = player.y;
       player.y += player.vy;
-      box = getPlayerBox(player.x, player.y);
+      box = getPlayerBox(player.x, player.y, totalHeight);
       let groundedThisFrame = false;
 
       for (let rect of rectangles) {
         if (rect.type === 'obstacle') {
-          if (box.right > rect.x && box.left < rect.x + rect.w && box.bottom > rect.y && box.top < rect.y + rect.h) {
+          if (overlapsRectSpace(rect, box)) {
             player.isAlive = false;
             playCrashSound();
             const deathY = player.y - 20;
-            createExplosion(player.x, deathY);
+            createExplosion(player.x, deathY, player.color);
             sendDeathEvent(player.x, deathY);
             sendPlayerState();
             return;
           }
         } else if (rect.type === 'platform' || rect.type === 'grass') {
-          if (box.right > rect.x + 2 && box.left < rect.x + rect.w - 2) {
-            if (player.vy >= 0 && box.bottom >= rect.y && box.bottom - player.vy <= rect.y + 12) {
-              player.y = rect.y;
-              player.vy = 0;
-              groundedThisFrame = true;
-            } else if (player.vy < 0 && box.top <= rect.y + rect.h && box.top - player.vy >= rect.y + rect.h - 12) {
-              player.y = rect.y + rect.h + totalHeight + headRadius * 2;
+          const halfW = rect.w / 2;
+          const feet = worldToRect(rect, player.x, player.y);
+          const footLocalX = feet.x - halfW;
+          const isOverEdge = footLocalX >= -halfW - headRadius && footLocalX <= halfW + headRadius;
+          if (!isOverEdge) continue;
+
+          if (player.vy >= 0 && feet.y >= -0.5 && worldToRect(rect, player.x, prevY).y <= 12) {
+            player.y = getRectSurfaceY(rect, player.x);
+            player.vy = 0;
+            groundedThisFrame = true;
+          } else if (player.vy < 0) {
+            const topLocal = worldToRect(rect, player.x, box.top);
+            const topPrevLocal = worldToRect(rect, player.x, box.top - player.vy);
+            if (topLocal.x >= -headRadius && topLocal.x <= rect.w + headRadius &&
+                topLocal.y <= rect.h + 0.5 && topPrevLocal.y >= rect.h - 12) {
+              const bumped = rectToWorld(rect, topLocal.x, rect.h);
+              player.y = bumped.y + totalHeight + headRadius * 2;
               player.vy = 0;
             }
           }
         }
+      }
+
+      if (resolvePlayerPenetration(totalHeight)) {
+        groundedThisFrame = true;
       }
 
       player.isGrounded = groundedThisFrame;
@@ -945,7 +1290,7 @@
         player.isAlive = false;
         playCrashSound();
         const deathY = player.y - 50;
-        createExplosion(player.x, deathY);
+        createExplosion(player.x, deathY, player.color);
         sendDeathEvent(player.x, deathY);
       }
 
@@ -959,6 +1304,45 @@
       sendPlayerState();
     }
 
+    const PLATFORM_SHADOW_DEPTH = 400;
+
+    function convexHullPoints(points) {
+      const pts = points.slice().sort((a, b) => (a.x - b.x) || (a.y - b.y));
+      const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+
+      const build = (source) => {
+        const stack = [];
+        for (const p of source) {
+          while (stack.length >= 2 && cross(stack[stack.length - 2], stack[stack.length - 1], p) <= 0) stack.pop();
+          stack.push(p);
+        }
+        return stack;
+      };
+
+      const lower = build(pts);
+      const upper = build(pts.slice().reverse());
+      lower.pop();
+      upper.pop();
+      return lower.concat(upper);
+    }
+
+    // Shadow is the platform silhouette extruded straight down, so a rotated
+    // platform keeps its shadow underneath instead of under its bounding box.
+    function drawPlatformShadow(r, camX, camY) {
+      const corners = getRectCorners(r);
+      const hull = convexHullPoints(
+        corners.concat(corners.map(c => ({ x: c.x, y: c.y + PLATFORM_SHADOW_DEPTH })))
+      );
+
+      ctx.beginPath();
+      ctx.moveTo(hull[0].x - camX, hull[0].y - camY);
+      for (let i = 1; i < hull.length; i++) {
+        ctx.lineTo(hull[i].x - camX, hull[i].y - camY);
+      }
+      ctx.closePath();
+      ctx.fill();
+    }
+
     function renderWorldObjects(camX, camY = 0) {
       drawTerrain(camX, camY);
       drawGrass(camX, camY);
@@ -966,34 +1350,37 @@
       ctx.fillStyle = PALETTE.platformShadow;
       for (let r of rectangles) {
         if (r.type === 'platform') {
-          const screenX = r.x - camX;
-          const shadowTop = (r.y + r.h) - camY;
-          ctx.fillRect(screenX, shadowTop, r.w, 400);
+          drawPlatformShadow(r, camX, camY);
         }
       }
 
       ctx.fillStyle = PALETTE.block;
       for (let r of rectangles) {
         if (r.type === 'obstacle') {
-          ctx.fillRect(r.x - camX, r.y - camY, r.w, r.h);
+          ctx.save();
+          setRectCanvasTransform(r, camX, camY);
+          ctx.fillRect(0, 0, r.w, r.h);
+          ctx.restore();
         }
       }
 
       for (let r of rectangles) {
         if (r.type === 'platform') {
-          const screenX = r.x - camX;
+          ctx.save();
+          setRectCanvasTransform(r, camX, camY);
           ctx.fillStyle = PALETTE.platform;
-          ctx.fillRect(screenX, r.y - camY, r.w, r.h);
+          ctx.fillRect(0, 0, r.w, r.h);
 
           const boltInset = 7;
           const boltRadius = 3.5;
           ctx.fillStyle = PALETTE.bolt;
           if (r.w > boltInset * 2 && r.h > boltInset * 2) {
-            drawHexagon(screenX + boltInset, (r.y + boltInset) - camY, boltRadius);
-            drawHexagon(screenX + r.w - boltInset, (r.y + boltInset) - camY, boltRadius);
-            drawHexagon(screenX + boltInset, (r.y + r.h - boltInset) - camY, boltRadius);
-            drawHexagon(screenX + r.w - boltInset, (r.y + r.h - boltInset) - camY, boltRadius);
+            drawHexagon(boltInset, boltInset, boltRadius);
+            drawHexagon(r.w - boltInset, boltInset, boltRadius);
+            drawHexagon(boltInset, r.h - boltInset, boltRadius);
+            drawHexagon(r.w - boltInset, r.h - boltInset, boltRadius);
           }
+          ctx.restore();
         }
       }
 
@@ -1005,9 +1392,9 @@
         ctx.restore();
       }
 
-      if (remotePlayer && remotePlayer.isAlive && !remotePlayer.isEditor) {
-        drawPlayer(remotePlayer, camX, camY);
-      }
+      remotePlayers.forEach((rp) => {
+        drawRemotePlayer(rp, camX, camY);
+      });
 
       if (player.isAlive) {
         drawPlayer(player, camX, camY);
@@ -1022,11 +1409,10 @@
 
       ctx.restore();
 
-      if (remotePlayer && remotePlayer.cursorX !== undefined && (remotePlayer.isEditor || !remotePlayer.isAlive)) {
-        const spX = (remotePlayer.cursorX - cameraX) * CAMERA_ZOOM;
-        const spY = (remotePlayer.cursorY - cameraY) * CAMERA_ZOOM;
-        drawCursorAtScreenPos(spX, spY, remotePlayer.isEditor);
-      }
+      remotePlayers.forEach((rp) => {
+        // While playing, a cursor marks peers that are editing or already dead.
+        if (rp.isEditor || !rp.isAlive) drawRemoteCursor(rp, cameraX, cameraY);
+      });
 
       ctx.fillStyle = PALETTE.player;
       ctx.font = '400 20px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
@@ -1123,42 +1509,73 @@
       renderWorldObjects(activeCamX, activeCamY);
 
       for (let r of rectangles) {
-        const rx = r.x - activeCamX;
-        const ry = r.y - activeCamY;
-
         const isSelected = selectedRects.includes(r);
+
+        ctx.save();
+        setRectCanvasTransform(r, activeCamX, activeCamY);
         ctx.strokeStyle = isSelected ? '#ffffff' : 'rgba(0,0,0,0.3)';
         ctx.lineWidth = (isSelected ? 2 : 1) / editorZoom;
-        ctx.strokeRect(rx, ry, r.w, r.h);
-
-        if (isSelected) {
-          ctx.fillStyle = '#ffffff';
-          const hs = 8 / editorZoom;
-          ctx.fillRect(rx - hs / 2, ry - hs / 2, hs, hs);
-          ctx.fillRect(rx + r.w - hs / 2, ry - hs / 2, hs, hs);
-          ctx.fillRect(rx - hs / 2, ry + r.h - hs / 2, hs, hs);
-          ctx.fillRect(rx + r.w - hs / 2, ry + r.h - hs / 2, hs, hs);
-        }
+        ctx.strokeRect(0, 0, r.w, r.h);
+        ctx.restore();
       }
 
       if (isSelecting) {
-        const screenStart = worldToScreenEditor(selectionStart.x, selectionStart.y);
         const currentMouse = screenToWorldEditor(lastMouseX, lastMouseY);
-        
+
         ctx.strokeStyle = '#ffffff';
         ctx.lineWidth = 1 / editorZoom;
         ctx.setLineDash([5 / editorZoom, 5 / editorZoom]);
-        ctx.strokeRect(selectionStart.x - activeCamX, selectionStart.y - activeCamY, 
+        ctx.strokeRect(selectionStart.x - activeCamX, selectionStart.y - activeCamY,
                        currentMouse.x - selectionStart.x, currentMouse.y - selectionStart.y);
         ctx.setLineDash([]);
       }
 
       ctx.restore();
 
-      if (remotePlayer && remotePlayer.cursorX !== undefined) {
-        const sp = worldToScreenEditor(remotePlayer.cursorX, remotePlayer.cursorY);
-        drawCursorAtScreenPos(sp.x, sp.y, remotePlayer.isEditor);
+      ctx.save();
+      ctx.fillStyle = '#ffffff';
+      for (const rect of selectedRects) {
+        for (let corner of getRectCorners(rect)) {
+          const sp = worldToScreenEditor(corner.x, corner.y);
+          ctx.fillRect(sp.x - 4, sp.y - 4, 8, 8);
+        }
       }
+
+      if (selectedRects.length === 1) {
+        const rect = selectedRects[0];
+        const anchor = rectToWorld(rect, rect.w / 2, 0);
+        const anchorScreen = worldToScreenEditor(anchor.x, anchor.y);
+        const handle = getRotationHandleScreenPos(rect);
+
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(anchorScreen.x, anchorScreen.y);
+        ctx.lineTo(handle.x, handle.y);
+        ctx.stroke();
+
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(handle.x, handle.y, 5, 0, Math.PI * 2);
+        ctx.fill();
+
+        if (isRotating) {
+          const degrees = (getRectRotation(rect) * 180 / Math.PI).toFixed(1);
+          ctx.font = '600 13px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.lineWidth = 3;
+          ctx.strokeStyle = 'rgba(0, 0, 0, 0.7)';
+          ctx.strokeText(`${degrees}°`, handle.x, handle.y - 12);
+          ctx.fillStyle = '#ffffff';
+          ctx.fillText(`${degrees}°`, handle.x, handle.y - 12);
+        }
+      }
+      ctx.restore();
+
+      remotePlayers.forEach((rp) => {
+        const sp = worldToScreenEditor(rp.cursorX, rp.cursorY);
+        drawCursorAtScreenPos(sp.x, sp.y, rp.isEditor, rp.color, `Player ${rp.slot + 1}`);
+      });
     }
 
     function render() {
@@ -1194,7 +1611,7 @@
       player.leg2 = { x: 0, y: groundY };
       particles = [];
       grassBladesMap.clear();
-      grassBottomNodes = [];
+      grassRunsByRect.clear();
       minNodeIdx = Infinity;
       maxNodeIdx = -Infinity;
       cameraX = player.x - (width / CAMERA_ZOOM) * 0.5;
@@ -1222,13 +1639,19 @@
     let dragStartPositions = [];
     let touchStartDist = 0;
     let touchStartZoom = 0;
+    let isRotating = false;
+    let rotationStartRect = null;
+    let rotationStartAngle = 0;
+    let rotationStartRotation = 0;
 
     const modeBtn = document.getElementById('modeBtn');
     const addBtn = document.getElementById('addBtn');
     const editorControls = document.getElementById('editorControls');
     const rectTypeSelect = document.getElementById('rectType');
 
-    document.querySelectorAll('#ui button, #ui select, #ui input').forEach(el => {
+    // Buttons and selects drop focus so the canvas keeps the keyboard, but the
+    // host id field has to stay focusable or it can never be typed into.
+    document.querySelectorAll('#ui button, #ui select').forEach(el => {
       el.addEventListener('focus', () => el.blur());
     });
 
@@ -1246,6 +1669,8 @@
     modeBtn.addEventListener('click', (e) => {
       e.target.blur();
       isEditor = !isEditor;
+      isRotating = false;
+      rotationStartRect = null;
       setPlacementMode(false);
       if (isEditor) {
         modeBtn.textContent = 'Switch to Play Mode';
@@ -1350,20 +1775,19 @@
 
     function getCornerHandle(e, rect) {
       if (!rect) return null;
-      const sp = worldToScreenEditor(rect.x, rect.y);
-      const sw = rect.w * editorZoom;
-      const sh = rect.h * editorZoom;
       const hitRadius = 10;
 
-      const corners = [
-        { name: 'tl', x: sp.x, y: sp.y },
-        { name: 'tr', x: sp.x + sw, y: sp.y },
-        { name: 'bl', x: sp.x, y: sp.y + sh },
-        { name: 'br', x: sp.x + sw, y: sp.y + sh }
+      const localCorners = [
+        { name: 'tl', lx: 0, ly: 0 },
+        { name: 'tr', lx: rect.w, ly: 0 },
+        { name: 'bl', lx: 0, ly: rect.h },
+        { name: 'br', lx: rect.w, ly: rect.h }
       ];
 
-      for (let c of corners) {
-        if (Math.hypot(e.clientX - c.x, e.clientY - c.y) <= hitRadius) {
+      for (let c of localCorners) {
+        const world = rectToWorld(rect, c.lx, c.ly);
+        const sp = worldToScreenEditor(world.x, world.y);
+        if (Math.hypot(e.clientX - sp.x, e.clientY - sp.y) <= hitRadius) {
           return c.name;
         }
       }
@@ -1374,6 +1798,247 @@
       undoStack.push(JSON.stringify(rectangles));
       redoStack = [];
       if (undoStack.length > 50) undoStack.shift();
+    }
+
+    const ROTATION_SNAP = Math.PI / 12;
+    const ROTATION_HANDLE_DISTANCE = 28;
+    const ROTATION_HANDLE_HIT_RADIUS = 11;
+
+    function getRectRotation(rect) {
+      return rect.rotation || 0;
+    }
+
+    function getRectCenter(rect) {
+      return { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 };
+    }
+
+    // Unit vector of the rect's local +x axis (its "right" side) in world space.
+    function getRectRight(rect) {
+      const rot = getRectRotation(rect);
+      return { x: Math.cos(rot), y: Math.sin(rot) };
+    }
+
+    // Unit vector of the rect's local -y axis (its "top" side) in world space.
+    function getRectUp(rect) {
+      const rot = getRectRotation(rect);
+      return { x: Math.sin(rot), y: -Math.cos(rot) };
+    }
+
+    // Converts a point in the rect's unrotated local space (origin at its top
+    // left corner, ignoring rotation) to world space.
+    function rectToWorld(rect, lx, ly) {
+      const rot = getRectRotation(rect);
+      if (rot === 0) return { x: rect.x + lx, y: rect.y + ly };
+      const cx = rect.x + rect.w / 2;
+      const cy = rect.y + rect.h / 2;
+      const dx = lx - rect.w / 2;
+      const dy = ly - rect.h / 2;
+      const cos = Math.cos(rot);
+      const sin = Math.sin(rot);
+      return { x: cx + dx * cos - dy * sin, y: cy + dx * sin + dy * cos };
+    }
+
+    // Inverse of rectToWorld.
+    function worldToRect(rect, wx, wy) {
+      const rot = getRectRotation(rect);
+      if (rot === 0) return { x: wx - rect.x, y: wy - rect.y };
+      const cx = rect.x + rect.w / 2;
+      const cy = rect.y + rect.h / 2;
+      const dx = wx - cx;
+      const dy = wy - cy;
+      const cos = Math.cos(rot);
+      const sin = Math.sin(rot);
+      return { x: dx * cos + dy * sin + rect.w / 2, y: -dx * sin + dy * cos + rect.h / 2 };
+    }
+
+    function getRectCorners(rect) {
+      return [
+        rectToWorld(rect, 0, 0),
+        rectToWorld(rect, rect.w, 0),
+        rectToWorld(rect, rect.w, rect.h),
+        rectToWorld(rect, 0, rect.h)
+      ];
+    }
+
+    function pointInRect(rect, wx, wy) {
+      const local = worldToRect(rect, wx, wy);
+      return local.x >= 0 && local.x <= rect.w && local.y >= 0 && local.y <= rect.h;
+    }
+
+    // World y where the rect's top surface sits at the given world x.
+    function getRectSurfaceY(rect, worldX) {
+      const rot = getRectRotation(rect);
+      if (rot === 0) return rect.y;
+      const right = getRectRight(rect);
+      const surface = rectToWorld(rect, rect.w / 2, 0);
+      if (Math.abs(right.x) < 1e-6) return surface.y;
+      const t = (worldX - surface.x) / right.x;
+      return surface.y + t * right.y;
+    }
+
+    // Screen space position of the little rotation handle, floating straight
+    // out from the middle of the rect's top edge.
+    function getRotationHandleScreenPos(rect) {
+      const up = getRectUp(rect);
+      const anchor = rectToWorld(rect, rect.w / 2, 0);
+      const sp = worldToScreenEditor(anchor.x, anchor.y);
+      return {
+        x: sp.x + up.x * ROTATION_HANDLE_DISTANCE,
+        y: sp.y + up.y * ROTATION_HANDLE_DISTANCE
+      };
+    }
+
+    function isOnRotationHandle(e, rect) {
+      const handle = getRotationHandleScreenPos(rect);
+      return Math.hypot(e.clientX - handle.x, e.clientY - handle.y) <= ROTATION_HANDLE_HIT_RADIUS;
+    }
+
+    // Pointer angle around the rect's centre, measured on screen so it stays
+    // consistent regardless of the editor zoom level.
+    function getPointerAngleFromRectCenter(rect, clientX, clientY) {
+      const center = getRectCenter(rect);
+      const sp = worldToScreenEditor(center.x, center.y);
+      return Math.atan2(clientY - sp.y, clientX - sp.x);
+    }
+
+    // Sets the canvas transform so the rect can be drawn in its own local
+    // space (0,0 to w,h), with camera offset applied.
+    function setRectCanvasTransform(rect, camX = 0, camY = 0) {
+      const rot = getRectRotation(rect);
+      ctx.translate(rect.x + rect.w / 2 - camX, rect.y + rect.h / 2 - camY);
+      if (rot !== 0) ctx.rotate(rot);
+      ctx.translate(-rect.w / 2, -rect.h / 2);
+    }
+
+    // Projects an axis aligned box (the player's) into the rect's local axes,
+    // so collision and grounding behave the same for rotated and flat rects.
+    // The centre is relative to the rect's centre, the half sizes are the
+    // box's bounding extents along the rect's axes.
+    function getBoxInRectSpace(rect, box) {
+      const right = getRectRight(rect);
+      const down = { x: -right.y, y: right.x };
+      const center = getRectCenter(rect);
+      const boxCenterX = (box.left + box.right) / 2;
+      const boxCenterY = (box.top + box.bottom) / 2;
+      const halfW = (box.right - box.left) / 2;
+      const halfH = (box.bottom - box.top) / 2;
+      const dx = boxCenterX - center.x;
+      const dy = boxCenterY - center.y;
+
+      return {
+        x: dx * right.x + dy * right.y,
+        y: dx * down.x + dy * down.y,
+        halfW: halfW * Math.abs(right.x) + halfH * Math.abs(right.y),
+        halfH: halfW * Math.abs(down.x) + halfH * Math.abs(down.y)
+      };
+    }
+
+    function overlapsRectSpace(rect, box) {
+      const local = getBoxInRectSpace(rect, box);
+      return local.x + local.halfW > -rect.w / 2 && local.x - local.halfW < rect.w / 2 &&
+             local.y + local.halfH > -rect.h / 2 && local.y - local.halfH < rect.h / 2;
+    }
+
+    function getPlayerBox(px, py, totalHeight) {
+      return {
+        left: px - 15,
+        right: px + 15,
+        top: py - totalHeight - 15 * 2,
+        bottom: py
+      };
+    }
+
+    // Separating axis test between the player's upright box and a rect that may
+    // be rotated. Returns the shallowest direction to push the player to get
+    // them out (pointing away from the rect), or null when they don't overlap.
+    function getBoxRectPushOut(rect, box) {
+      const center = getRectCenter(rect);
+      const right = getRectRight(rect);
+      const down = { x: -right.y, y: right.x };
+      const boxCenterX = (box.left + box.right) / 2;
+      const boxCenterY = (box.top + box.bottom) / 2;
+      const boxHalfW = (box.right - box.left) / 2;
+      const boxHalfH = (box.bottom - box.top) / 2;
+
+      const axes = [{ x: 1, y: 0 }, { x: 0, y: 1 }, right, down];
+      let best = null;
+
+      for (const axis of axes) {
+        const boxRadius = boxHalfW * Math.abs(axis.x) + boxHalfH * Math.abs(axis.y);
+        const rectRadius = (rect.w / 2) * Math.abs(right.x * axis.x + right.y * axis.y) +
+                           (rect.h / 2) * Math.abs(down.x * axis.x + down.y * axis.y);
+        const dist = (boxCenterX - center.x) * axis.x + (boxCenterY - center.y) * axis.y;
+        const overlap = boxRadius + rectRadius - Math.abs(dist);
+        if (overlap <= 0) return null;
+
+        const sign = dist >= 0 ? 1 : -1;
+        if (!best || overlap < best.depth) {
+          best = { x: axis.x * sign, y: axis.y * sign, depth: overlap };
+        }
+      }
+
+      return best;
+    }
+
+    // Safety net for the forgiving landing/side checks above: whatever the
+    // orientation, the player must never stay inside a solid (a rotated rect's
+    // underside has no landing case, so they would otherwise walk through it).
+    // Resolves along the shallowest axis, like a rigid body solver would, and
+    // drops the feet onto the surface when pushed out of a top face.
+    function resolvePlayerPenetration(totalHeight) {
+      let landed = false;
+
+      for (let pass = 0; pass < 4; pass++) {
+        let pushed = false;
+
+        for (let rect of rectangles) {
+          if (rect.type === 'obstacle') continue;
+
+          const box = getPlayerBox(player.x, player.y, totalHeight);
+          const push = getBoxRectPushOut(rect, box);
+          if (!push) continue;
+
+          const up = getRectUp(rect);
+          const isTopFace = push.x * up.x + push.y * up.y > 0.5;
+          const feetLocalY = worldToRect(rect, player.x, player.y).y;
+
+          // Standing on (or just into) the top face is the feet placement code's
+          // job, and an upright box always pokes into a sloped surface.
+          if (isTopFace && feetLocalY <= 15) continue;
+
+          player.x += push.x * push.depth;
+          player.y += push.y * push.depth;
+
+          const intoSurface = player.vx * push.x + player.vy * push.y;
+          if (intoSurface < 0) {
+            player.vx -= push.x * intoSurface;
+            player.vy -= push.y * intoSurface;
+          }
+
+          if (isTopFace) {
+            player.y = getRectSurfaceY(rect, player.x);
+            player.vy = 0;
+            landed = true;
+          }
+
+          pushed = true;
+        }
+
+        if (!pushed) break;
+      }
+
+      return landed;
+    }
+
+    // Slides the player sideways so their centre ends up at the given local x of
+    // the rect, which is how walking into a rotated side face is resolved.
+    function movePlayerToRectLocalX(rect, targetLocalX) {
+      const right = getRectRight(rect);
+      const center = getRectCenter(rect);
+      const currentLocalX = (player.x - center.x) * right.x + (player.y - center.y) * right.y;
+      const delta = targetLocalX - currentLocalX;
+      player.x += delta * right.x;
+      player.y += delta * right.y;
     }
 
     function undo() {
@@ -1406,6 +2071,16 @@
         return;
       }
 
+      if (selectedRects.length === 1 && isOnRotationHandle(e, selectedRects[0])) {
+        saveEditorState();
+        selectedRect = selectedRects[0];
+        isRotating = true;
+        rotationStartRect = selectedRect;
+        rotationStartRotation = getRectRotation(selectedRect);
+        rotationStartAngle = getPointerAngleFromRectCenter(selectedRect, e.clientX, e.clientY);
+        return;
+      }
+
       if (selectedRects.length > 0) {
         for (const rect of selectedRects) {
           const corner = getCornerHandle(e, rect);
@@ -1419,12 +2094,7 @@
         }
         let clickedOnSelected = false;
         for (const rect of selectedRects) {
-          if (
-            mouseWorld.x >= rect.x &&
-            mouseWorld.x <= rect.x + rect.w &&
-            mouseWorld.y >= rect.y &&
-            mouseWorld.y <= rect.y + rect.h
-          ) {
+          if (pointInRect(rect, mouseWorld.x, mouseWorld.y)) {
             clickedOnSelected = true;
             break;
           }
@@ -1447,12 +2117,7 @@
       selectedRect = null;
       for (let i = rectangles.length - 1; i >= 0; i--) {
         const r = rectangles[i];
-        if (
-          mouseWorld.x >= r.x &&
-          mouseWorld.x <= r.x + r.w &&
-          mouseWorld.y >= r.y &&
-          mouseWorld.y <= r.y + r.h
-        ) {
+        if (pointInRect(r, mouseWorld.x, mouseWorld.y)) {
           selectedRect = r;
           selectedRects = [r];
           isDragging = true;
@@ -1478,6 +2143,7 @@
           y: Math.round(spawnY),
           w: 144,
           h: 48,
+          rotation: 0,
           type: rectTypeSelect.value
         };
         rectangles.push(newRect);
@@ -1508,19 +2174,35 @@
         return;
       }
 
+      if (isRotating && rotationStartRect) {
+        const rect = rotationStartRect;
+        const angle = getPointerAngleFromRectCenter(rect, e.clientX, e.clientY);
+        let nextRotation = rotationStartRotation + (angle - rotationStartAngle);
+        nextRotation = e.shiftKey
+          ? Math.round(nextRotation / ROTATION_SNAP) * ROTATION_SNAP
+          : Math.round(nextRotation * 1000) / 1000;
+
+        if (getRectRotation(rect) !== nextRotation) {
+          rect.rotation = nextRotation;
+          sendLevelSync();
+        }
+        return;
+      }
+
       if (resizeHandle && selectedRect) {
-        let curX = mouseWorld.x;
-        let curY = mouseWorld.y;
+        // Corners are dragged in the rect's own space, so resizing a rotated
+        // rect keeps its rotation.
+        const cursor = worldToRect(selectedRect, mouseWorld.x, mouseWorld.y);
 
         let left = resizeInitial.x;
         let right = resizeInitial.x + resizeInitial.w;
         let top = resizeInitial.y;
         let bottom = resizeInitial.y + resizeInitial.h;
 
-        if (resizeHandle.includes('l')) left = curX;
-        if (resizeHandle.includes('r')) right = curX;
-        if (resizeHandle.includes('t')) top = curY;
-        if (resizeHandle.includes('b')) bottom = curY;
+        if (resizeHandle.includes('l')) left = cursor.x;
+        if (resizeHandle.includes('r')) right = cursor.x;
+        if (resizeHandle.includes('t')) top = cursor.y;
+        if (resizeHandle.includes('b')) bottom = cursor.y;
 
         if (e.shiftKey) {
           if (resizeHandle.includes('l')) left = Math.round(left / GRID_SIZE) * GRID_SIZE;
@@ -1578,13 +2260,19 @@
         dragStartPositions = selectedRects.map(r => ({ x: r.x, y: r.y }));
         isSelecting = false;
       }
-      
+
       if (isDragging) {
         saveEditorState();
         sendLevelSync();
       }
-      
+
+      if (isRotating) {
+        sendLevelSync();
+      }
+
       isDragging = false;
+      isRotating = false;
+      rotationStartRect = null;
       resizeHandle = null;
       isPanning = false;
     });
@@ -1609,8 +2297,6 @@
 
       if (e.key === 'Shift') keys.shift = true;
       if (e.code === 'ShiftLeft' || e.code === 'ShiftRight' || e.code === 'ArrowDown' || e.code === 'KeyS') keys.crouch = true;
-      if (e.code === 'KeyQ') keys.rotateLeft = true;
-      if (e.code === 'KeyE') keys.rotateRight = true;
 
       if (isEditor) {
         if ((e.ctrlKey || e.metaKey) && e.code === 'KeyZ') {
@@ -1668,8 +2354,6 @@
 
       if (e.key === 'Shift') keys.shift = false;
       if (e.code === 'ShiftLeft' || e.code === 'ShiftRight' || e.code === 'ArrowDown' || e.code === 'KeyS') keys.crouch = false;
-      if (e.code === 'KeyQ') keys.rotateLeft = false;
-      if (e.code === 'KeyE') keys.rotateRight = false;
       if (e.code === 'KeyA' || e.code === 'ArrowLeft') keys.left = false;
       if (e.code === 'KeyD' || e.code === 'ArrowRight') keys.right = false;
       if (e.code === 'Space' || e.code === 'KeyW' || e.code === 'ArrowUp') keys.jump = false;
@@ -1721,10 +2405,21 @@
         lastMouseX = touch.clientX;
         lastMouseY = touch.clientY;
         const mouseWorld = screenToWorldEditor(touch.clientX, touch.clientY);
+        const touchPoint = { clientX: touch.clientX, clientY: touch.clientY };
+
+        if (selectedRects.length === 1 && isOnRotationHandle(touchPoint, selectedRects[0])) {
+          saveEditorState();
+          selectedRect = selectedRects[0];
+          isRotating = true;
+          rotationStartRect = selectedRect;
+          rotationStartRotation = getRectRotation(selectedRect);
+          rotationStartAngle = getPointerAngleFromRectCenter(selectedRect, touch.clientX, touch.clientY);
+          return;
+        }
 
         if (selectedRects.length > 0) {
           for (const rect of selectedRects) {
-            const corner = getCornerHandle({ clientX: touch.clientX, clientY: touch.clientY }, rect);
+            const corner = getCornerHandle(touchPoint, rect);
             if (corner) {
               saveEditorState();
               resizeHandle = corner;
@@ -1735,12 +2430,7 @@
           }
           let clickedOnSelected = false;
           for (const rect of selectedRects) {
-            if (
-              mouseWorld.x >= rect.x &&
-              mouseWorld.x <= rect.x + rect.w &&
-              mouseWorld.y >= rect.y &&
-              mouseWorld.y <= rect.y + rect.h
-            ) {
+            if (pointInRect(rect, mouseWorld.x, mouseWorld.y)) {
               clickedOnSelected = true;
               break;
             }
@@ -1757,12 +2447,7 @@
         selectedRect = null;
         for (let i = rectangles.length - 1; i >= 0; i--) {
           const r = rectangles[i];
-          if (
-            mouseWorld.x >= r.x &&
-            mouseWorld.x <= r.x + r.w &&
-            mouseWorld.y >= r.y &&
-            mouseWorld.y <= r.y + r.h
-          ) {
+          if (pointInRect(r, mouseWorld.x, mouseWorld.y)) {
             selectedRect = r;
             selectedRects = [r];
             isDragging = true;
@@ -1786,6 +2471,7 @@
             y: Math.round(spawnY),
             w: 144,
             h: 48,
+            rotation: 0,
             type: rectTypeSelect.value
           };
           rectangles.push(newRect);
@@ -1825,19 +2511,28 @@
         lastMouseY = touch.clientY;
         const mouseWorld = screenToWorldEditor(touch.clientX, touch.clientY);
 
-        if (resizeHandle && selectedRect) {
-          let curX = mouseWorld.x;
-          let curY = mouseWorld.y;
+        if (isRotating && rotationStartRect) {
+          const rect = rotationStartRect;
+          const angle = getPointerAngleFromRectCenter(rect, touch.clientX, touch.clientY);
+          let nextRotation = rotationStartRotation + (angle - rotationStartAngle);
+          nextRotation = Math.round(nextRotation * 1000) / 1000;
+
+          if (getRectRotation(rect) !== nextRotation) {
+            rect.rotation = nextRotation;
+            sendLevelSync();
+          }
+        } else if (resizeHandle && selectedRect) {
+          const cursor = worldToRect(selectedRect, mouseWorld.x, mouseWorld.y);
 
           let left = resizeInitial.x;
           let right = resizeInitial.x + resizeInitial.w;
           let top = resizeInitial.y;
           let bottom = resizeInitial.y + resizeInitial.h;
 
-          if (resizeHandle.includes('l')) left = curX;
-          if (resizeHandle.includes('r')) right = curX;
-          if (resizeHandle.includes('t')) top = curY;
-          if (resizeHandle.includes('b')) bottom = curY;
+          if (resizeHandle.includes('l')) left = cursor.x;
+          if (resizeHandle.includes('r')) right = cursor.x;
+          if (resizeHandle.includes('t')) top = cursor.y;
+          if (resizeHandle.includes('b')) bottom = cursor.y;
 
           left = Math.round(left / GRID_SIZE) * GRID_SIZE;
           right = Math.round(right / GRID_SIZE) * GRID_SIZE;
@@ -1876,13 +2571,19 @@
 
     canvas.addEventListener('touchend', (e) => {
       if (!isEditor) return;
-      
+
       if (isDragging) {
         saveEditorState();
         sendLevelSync();
       }
-      
+
+      if (isRotating) {
+        sendLevelSync();
+      }
+
       isDragging = false;
+      isRotating = false;
+      rotationStartRect = null;
       resizeHandle = null;
       isPanning = false;
     });
