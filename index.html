@@ -148,12 +148,58 @@
 
     let rectangles = [];
 
+    // Every rect carries a stable id so peers can talk about one shape instead of
+    // one array position. Syncing by index meant two people editing different
+    // shapes overwrote each other, and any reorder or delete silently moved
+    // everyone's selection onto a different rect. The random prefix keeps ids
+    // unique when two peers add a shape at the same moment.
+    const RECT_ID_PREFIX = Math.random().toString(36).slice(2, 8);
+    let nextRectId = 1;
+
+    function newRectId() {
+      return RECT_ID_PREFIX + '-' + (nextRectId++).toString(36);
+    }
+
+    function ensureRectId(rect) {
+      if (rect && !rect.id) rect.id = newRectId();
+      return rect;
+    }
+
+    function ensureRectIds(list) {
+      if (Array.isArray(list)) list.forEach(ensureRectId);
+      return list;
+    }
+
+    // The fields that make up a rect's identity for sync purposes. Ids are added
+    // on load; the geometry is what peers merge.
+    function rectPayload(rect) {
+      return {
+        id: rect.id,
+        x: rect.x,
+        y: rect.y,
+        w: rect.w,
+        h: rect.h,
+        type: rect.type,
+        rotation: getRectRotation(rect)
+      };
+    }
+
+    function applyRectPayload(rect, payload) {
+      rect.x = payload.x;
+      rect.y = payload.y;
+      rect.w = payload.w;
+      rect.h = payload.h;
+      rect.type = payload.type;
+      rect.rotation = payload.rotation || 0;
+      return rect;
+    }
+
     async function loadDefaultLevel() {
       try {
         const response = await fetch('level.json');
         if (response.ok) {
           const levelData = await response.json();
-          rectangles = levelData;
+          adoptLocalLevel(levelData);
           return;
         }
       } catch (err) {
@@ -163,12 +209,12 @@
       const savedLevel = localStorage.getItem('custom_runner_level');
       if (savedLevel) {
         try {
-          rectangles = JSON.parse(savedLevel);
+          adoptLocalLevel(JSON.parse(savedLevel));
         } catch (err) {
-          rectangles = getDefaultRectangles();
+          adoptLocalLevel(getDefaultRectangles());
         }
       } else {
-        rectangles = getDefaultRectangles();
+        adoptLocalLevel(getDefaultRectangles());
       }
     }
 
@@ -249,6 +295,10 @@
       crouchFactor: 0,
       rotation: 0 // Rotation angle in radians
     };
+
+    // The surface the feet were placed on last step, so walking down a slope can
+    // follow that same surface instead of dropping onto it.
+    let playerGroundRect = null;
 
     // --- PeerJS Networking Integration ---
     // Star topology: the host owns the room, hands out a colour slot to every
@@ -422,14 +472,14 @@
           localSlot = data.slot;
           applyLocalColor();
           applyRoster(data.players);
-          if (data.rectangles) syncLevelFromRemote(data.rectangles);
+          if (data.rectangles) adoptRemoteLevel(data.rectangles);
           sendPlayerState(true);
           break;
         case 'roster':
           applyRoster(data.players);
           break;
         case 'levelSync':
-          syncLevelFromRemote(data.rectangles);
+          applyLevelOps(data.upserts, data.removals);
           if (isHost) broadcast(data, connId);
           break;
         case 'playerState':
@@ -467,6 +517,17 @@
       rp.slot = colorIndex(data.slot !== undefined ? data.slot : rp.slot);
       rp.color = getPlayerColor(rp.slot);
 
+      // A death packet is only an explosion trigger: it carries no motion state
+      // at all. Buffering it blended undefined into vx/animPhase, which NaNs the
+      // interpolated walk cycle and then, through the leg easing, the feet
+      // themselves, and a canvas path with a NaN coordinate is dropped whole.
+      // The playerState that follows carries the real state, alive or not.
+      if (data.type === 'death') {
+        createExplosion(data.x, data.y, rp.color);
+        playCrashSound();
+        return;
+      }
+
       // Positions are buffered and interpolated at render time instead of
       // snapping to whatever arrived last, which is what made remote players
       // stutter at the snapshot rate.
@@ -480,11 +541,6 @@
         cursorX: data.cursorX, cursorY: data.cursorY, dist: data.dist || 0
       });
       if (rp.snap.length > REMOTE_BUFFER_LIMIT) rp.snap.shift();
-
-      if (data.type === 'death') {
-        createExplosion(data.x, data.y, rp.color);
-        playCrashSound();
-      }
     }
 
     // Interpolates along the shortest arc, so wrapping values like the walk
@@ -709,6 +765,40 @@
       });
     }
 
+    // What we believe every peer currently holds, keyed by rect id. The sync
+    // diffs against this and sends only what actually changed. Shipping the whole
+    // array instead meant two peers editing different shapes each sent a stale
+    // copy of the other's shape every 50ms, so they kept overwriting each other
+    // and a shape snapped back while you were still dragging it.
+    let syncedRects = new Map();
+
+    function isSameRectPayload(a, b) {
+      return a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h &&
+             a.type === b.type && (a.rotation || 0) === (b.rotation || 0);
+    }
+
+    function resetLevelSyncBaseline() {
+      ensureRectIds(rectangles);
+      syncedRects = new Map();
+      for (const rect of rectangles) {
+        syncedRects.set(rect.id, rectPayload(rect));
+      }
+    }
+
+    // Shapes this client is actively dragging, resizing or rotating. A remote
+    // update aimed at one of these is dropped: the in-flight gesture owns it
+    // until the pointer comes back up, otherwise the shape is yanked out from
+    // under the cursor by whichever peer happens to sync at that moment.
+    function getLockedRectIds() {
+      const locked = new Set();
+      if (isDragging) {
+        for (const rect of selectedRects) if (rect && rect.id) locked.add(rect.id);
+      }
+      if (resizeHandle && selectedRect && selectedRect.id) locked.add(selectedRect.id);
+      if (isRotating && rotationStartRect && rotationStartRect.id) locked.add(rotationStartRect.id);
+      return locked;
+    }
+
     let levelSyncQueued = false;
     function sendLevelSync() {
       if (connections.size === 0 || levelSyncQueued) return;
@@ -716,32 +806,104 @@
       // Editor edits fire on every pointer move while dragging, coalesce them.
       setTimeout(() => {
         levelSyncQueued = false;
+        if (connections.size === 0) return;
+
+        // Cheap insurance for any path that built a rect without going through
+        // adoptLevel: the diff is keyed by id, so every rect needs one.
+        ensureRectIds(rectangles);
+
+        const upserts = [];
+        const removals = [];
+        const present = new Set();
+
+        for (const rect of rectangles) {
+          const payload = rectPayload(rect);
+          const known = syncedRects.get(rect.id);
+          if (!known || !isSameRectPayload(known, payload)) upserts.push(payload);
+          syncedRects.set(rect.id, payload);
+          present.add(rect.id);
+        }
+
+        for (const id of Array.from(syncedRects.keys())) {
+          if (!present.has(id)) removals.push(id);
+        }
+        for (const id of removals) syncedRects.delete(id);
+
+        if (upserts.length === 0 && removals.length === 0) return;
+
         broadcast({
           type: 'levelSync',
           from: localPeerId,
-          rectangles
+          upserts,
+          removals
         });
       }, LEVEL_SYNC_INTERVAL);
     }
 
-    function syncLevelFromRemote(newRects) {
-      // The payload is a whole new array of new objects, so the selection holds
-      // references that are no longer in `rectangles` and the editor would keep
-      // drawing and dragging stale rects. Re-point the selection at the same
-      // positions in the new array, including an in-flight rotation.
-      const previousSelected = selectedRects.slice();
-      const remap = (rect) => {
-        const idx = rect ? previousSelected.indexOf(rect) : -1;
-        return idx === -1 ? null : newRects[idx];
-      };
+    // Applies a peer's edits in place, by id. Mutating the existing rect objects
+    // rather than swapping in a fresh array keeps every live reference valid: the
+    // selection, the rect being dragged and the rotation pivot all survive
+    // another peer editing at the same time.
+    function applyLevelOps(upserts, removals) {
+      if (Array.isArray(removals)) {
+        for (const id of removals) {
+          const idx = rectangles.findIndex(r => r.id === id);
+          if (idx !== -1) {
+            const removed = rectangles[idx];
+            selectedRects = selectedRects.filter(r => r !== removed);
+            if (selectedRect === removed) selectedRect = null;
+            if (rotationStartRect === removed) rotationStartRect = null;
+            if (playerGroundRect === removed) playerGroundRect = null;
+            rectangles.splice(idx, 1);
+          }
+          syncedRects.delete(id);
+        }
+      }
 
-      const wasRotatingThis = rotationStartRect != null &&
-        previousSelected.indexOf(rotationStartRect) !== -1;
-      if (wasRotatingThis) rotationStartRect = remap(rotationStartRect);
+      if (Array.isArray(upserts)) {
+        const locked = getLockedRectIds();
+        for (const payload of upserts) {
+          if (!payload || !payload.id) continue;
+          const existing = rectangles.find(r => r.id === payload.id);
+          if (existing) {
+            if (locked.has(payload.id)) continue;
+            applyRectPayload(existing, payload);
+            syncedRects.set(payload.id, rectPayload(existing));
+          } else {
+            const added = applyRectPayload({ id: payload.id }, payload);
+            rectangles.push(added);
+            syncedRects.set(payload.id, rectPayload(added));
+          }
+        }
+      }
+    }
 
-      selectedRects = previousSelected.map(remap).filter(r => r != null);
+    // Wholesale level adoption, used when a guest joins and the host hands over
+    // the level. The selection is re-pointed by id; it used to be re-pointed by
+    // indexOf() within the selection, which was then used as an index into the
+    // whole level, so any sync moved the selection onto a different rect, or
+    // emptied it entirely when the level had shrunk. An empty selection means the
+    // mousedown handler skips its drag and resize branches, so nothing could be
+    // moved or rotated at all.
+    function adoptRemoteLevel(newRects) {
+      rectangles = ensureRectIds(Array.isArray(newRects) ? newRects : []);
+
+      const byId = new Map();
+      for (const rect of rectangles) byId.set(rect.id, rect);
+
+      selectedRects = selectedRects.map(r => byId.get(r.id)).filter(Boolean);
+      if (rotationStartRect) rotationStartRect = byId.get(rotationStartRect.id) || null;
       selectedRect = selectedRects.length > 0 ? selectedRects[0] : null;
-      rectangles = newRects;
+
+      resetLevelSyncBaseline();
+    }
+
+    // Replaces the level from local data (load, import, localStorage, undo). Keeps
+    // ids so the sync diff still lines up with what peers already hold.
+    function adoptLocalLevel(list) {
+      rectangles = ensureRectIds(Array.isArray(list) ? list : []);
+      resetLevelSyncBaseline();
+      return rectangles;
     }
 
     function sendDeathEvent(x, y) {
@@ -1070,6 +1232,31 @@
       return { kneeX, kneeY, tipX, tipY };
     }
 
+    // Eases a foot towards its target, snapping instead of easing whenever the
+    // stored position cannot be trusted. Feet are tracked in screen space, and
+    // both ways of getting that wrong are permanent: easing towards a NaN target
+    // makes the stored value NaN for good, and a NaN reaching the leg path makes
+    // the canvas drop the whole stroke, so the legs simply stop being drawn. A
+    // remote player also starts out with its feet in world coordinates, far from
+    // where the easing expects them, which would drag the legs across the screen.
+    function stepLeg(leg, targetX, targetY, ease) {
+      const usable = Number.isFinite(leg.x) && Number.isFinite(leg.y) &&
+                     Number.isFinite(targetX) && Number.isFinite(targetY) &&
+                     Math.abs(leg.x - targetX) < LEG_SNAP_DISTANCE &&
+                     Math.abs(leg.y - targetY) < LEG_SNAP_DISTANCE;
+      if (!usable) {
+        leg.x = targetX;
+        leg.y = targetY;
+        return;
+      }
+      leg.x += (targetX - leg.x) * ease;
+      leg.y += (targetY - leg.y) * ease;
+    }
+
+    // How far a foot may sit from its target before it is placed rather than
+    // eased. Comfortably above a frame of running, well below a screen width.
+    const LEG_SNAP_DISTANCE = 120;
+
     const PLAYER_HEAD_RADIUS = 15;
     const PLAYER_LEG_WIDTH = 12;
     const PLAYER_THIGH_LEN = 22;
@@ -1162,10 +1349,8 @@
       // Same easing as before at 60Hz, just scaled to the real frame length so
       // the legs settle at the same visual rate on any display.
       const legEase = 1 - Math.pow(1 - 0.35, renderScale);
-      p.leg1.x += (target1X - p.leg1.x) * legEase;
-      p.leg1.y += (target1Y - p.leg1.y) * legEase;
-      p.leg2.x += (target2X - p.leg2.x) * legEase;
-      p.leg2.y += (target2Y - p.leg2.y) * legEase;
+      stepLeg(p.leg1, target1X, target1Y, legEase);
+      stepLeg(p.leg2, target2X, target2Y, legEase);
 
       ctx.save();
       // Your own runner stays solid so you can pick yourself out of a crowd.
@@ -1366,7 +1551,8 @@
       box = getPlayerBox(player.x, player.y, totalHeight);
       let groundedThisFrame = false;
       let standRotation = 0; // surface tilt to lean into, 0 while airborne
-      let landedRect = null;
+      let standRect = null; // surface the feet were placed on
+      const wasGrounded = player.isGrounded;
 
       for (let rect of rectangles) {
         if (rect.type === 'obstacle') {
@@ -1380,6 +1566,11 @@
             return;
           }
         } else if (rect.type === 'platform' || rect.type === 'grass') {
+          // Past the climb limit this face is a wall, not a floor: no landing on
+          // it and no standing on it. Penetration resolution still keeps it solid,
+          // so the runner is pushed off it rather than dropping through.
+          if (!canStandOn(rect)) continue;
+
           const halfW = rect.w / 2;
           const feet = worldToRect(rect, player.x, player.y);
           const footLocalX = feet.x - halfW;
@@ -1391,6 +1582,19 @@
             player.vy = 0;
             groundedThisFrame = true;
             standRotation = getRectRotation(rect);
+            standRect = rect;
+          } else if (wasGrounded && player.vy >= 0 && rect === playerGroundRect &&
+                     feet.y >= -SLOPE_SNAP_DISTANCE) {
+            // Walking down a slope: the surface has dropped away underneath, so
+            // the feet sit a little above it. Falling onto it instead would leave
+            // the runner airborne for a step or two on every stride and skitter
+            // them down the hill, so hold them on the surface they are already
+            // standing on, exactly as if it were flat.
+            player.y = getRectSurfaceY(rect, player.x);
+            player.vy = 0;
+            groundedThisFrame = true;
+            standRotation = getRectRotation(rect);
+            standRect = rect;
           } else if (player.vy < 0) {
             const topLocal = worldToRect(rect, player.x, box.top);
             const topPrevLocal = worldToRect(rect, player.x, box.top - player.vy);
@@ -1404,12 +1608,15 @@
         }
       }
 
-      if (resolvePlayerPenetration(totalHeight, landedRect)) {
+      const landedRect = resolvePlayerPenetration(totalHeight);
+      if (landedRect) {
         groundedThisFrame = true;
-        if (landedRect) standRotation = getRectRotation(landedRect);
+        standRotation = getRectRotation(landedRect);
+        standRect = landedRect;
       }
 
       player.isGrounded = groundedThisFrame;
+      playerGroundRect = standRect;
       applyPlayerTilt(standRotation);
 
       if (player.isGrounded && Math.abs(player.vx) > 0.1) {
@@ -1786,6 +1993,7 @@
       player.rotation = 0;
       player.leg1 = { x: 0, y: groundY };
       player.leg2 = { x: 0, y: groundY };
+      playerGroundRect = null;
       particles = [];
       grassBladesMap.clear();
       grassRunsByRect.clear();
@@ -1890,7 +2098,7 @@
       e.target.blur();
       const data = localStorage.getItem('custom_runner_level');
       if (data) {
-        rectangles = JSON.parse(data);
+        adoptLocalLevel(JSON.parse(data));
         restartGame();
         sendLevelSync();
         alert('Level loaded from LocalStorage!');
@@ -1921,7 +2129,7 @@
       const reader = new FileReader();
       reader.onload = (event) => {
         try {
-          rectangles = JSON.parse(event.target.result);
+          adoptLocalLevel(JSON.parse(event.target.result));
           sendLevelSync();
           alert('Level imported successfully!');
         } catch (err) {
@@ -1934,7 +2142,7 @@
     document.getElementById('clearBtn').addEventListener('click', (e) => {
       e.target.blur();
       if (confirm('Are you sure you want to clear all rectangles?')) {
-        rectangles = getDefaultRectangles();
+        adoptLocalLevel(getDefaultRectangles());
         selectedRects = [];
         selectedRect = null;
         sendLevelSync();
@@ -2061,6 +2269,27 @@
       const t = (worldX - surface.x) / right.x;
       return surface.y + t * right.y;
     }
+
+    // Steepest surface a runner can hold onto. Past this the face is a wall: no
+    // landing on it and no standing on it, so a slope that has been tipped too
+    // far simply refuses to be climbed instead of turning into a floor.
+    const MAX_CLIMB_ANGLE = (45 * Math.PI) / 180;
+
+    function canStandOn(rect) {
+      // Folded into (-PI, PI] first: the rotation handle can be dragged right
+      // round, and 315 degrees is a climbable 45 degree slope, not a wall.
+      let rot = getRectRotation(rect) % (Math.PI * 2);
+      if (rot > Math.PI) rot -= Math.PI * 2;
+      if (rot <= -Math.PI) rot += Math.PI * 2;
+      return Math.abs(rot) <= MAX_CLIMB_ANGLE;
+    }
+
+    // How far the surface may fall away underfoot before the runner stops
+    // following it. Running at full speed drops the surface by well under a
+    // tenth of a unit per step, so this only has to swallow the rounding in the
+    // surface height while staying far too small to yank the runner onto some
+    // other block that happens to sit just below them.
+    const SLOPE_SNAP_DISTANCE = 6;
 
     // Screen space position of the little rotation handle, floating straight
     // out from the middle of the rect's top edge.
@@ -2289,10 +2518,12 @@
     // underside has no landing case, so they would otherwise walk through it).
     // Resolves along the shallowest axis, like a rigid body solver would, and
     // drops the feet onto the surface when pushed out of a top face.
-    // Pass the rect you land on via `landedRect` so the caller can align the
-    // player to that surface; it stays null when nothing was landed on.
-    function resolvePlayerPenetration(totalHeight, landedRect) {
-      let landed = false;
+    // Returns the rect the feet ended up on, or null when nothing was landed on,
+    // so the caller can lean the player into that surface. (An out-parameter
+    // would not work: it is a primitive, so the caller's variable never changed
+    // and the tilt was silently never applied.)
+    function resolvePlayerPenetration(totalHeight) {
+      let landedRect = null;
 
       for (let pass = 0; pass < 4; pass++) {
         let pushed = false;
@@ -2324,10 +2555,7 @@
           if (isTopFace) {
             player.y = getRectSurfaceY(rect, player.x);
             player.vy = 0;
-            if (!landed || getRectRotation(rect) !== getRectRotation(landedRect)) {
-              landedRect = rect;
-            }
-            landed = true;
+            if (!landedRect) landedRect = rect;
           }
 
           pushed = true;
@@ -2336,7 +2564,7 @@
         if (!pushed) break;
       }
 
-      return landed;
+      return landedRect;
     }
 
     // Slides the player sideways so their centre ends up at the given local x of
@@ -2353,7 +2581,7 @@
     function undo() {
       if (undoStack.length === 0) return;
       redoStack.push(JSON.stringify(rectangles));
-      rectangles = JSON.parse(undoStack.pop());
+      adoptLocalLevel(JSON.parse(undoStack.pop()));
       selectedRects = [];
       selectedRect = null;
       sendLevelSync();
@@ -2362,7 +2590,7 @@
     function redo() {
       if (redoStack.length === 0) return;
       undoStack.push(JSON.stringify(rectangles));
-      rectangles = JSON.parse(redoStack.pop());
+      adoptLocalLevel(JSON.parse(redoStack.pop()));
       selectedRects = [];
       selectedRect = null;
       sendLevelSync();
@@ -2445,6 +2673,7 @@
         }
 
         const newRect = {
+          id: newRectId(),
           x: Math.round(spawnX),
           y: Math.round(spawnY),
           w: 144,
@@ -2588,12 +2817,12 @@
           e.preventDefault();
         }
         if ((e.ctrlKey || e.metaKey) && e.code === 'KeyC' && selectedRects.length > 0) {
-          clipboard = selectedRects.map(r => ({ ...r }));
+          clipboard = selectedRects.map(r => ({ ...r, id: undefined }));
           e.preventDefault();
         }
         if ((e.ctrlKey || e.metaKey) && e.code === 'KeyV' && clipboard) {
           saveEditorState();
-          const pastedRects = clipboard.map(r => ({ ...r }));
+          const pastedRects = clipboard.map(r => ({ ...r, id: newRectId() }));
           rectangles.push(...pastedRects);
           selectedRects = pastedRects;
           selectedRect = pastedRects[0];
@@ -2744,6 +2973,7 @@
           spawnY = Math.round(spawnY / GRID_SIZE) * GRID_SIZE;
 
           const newRect = {
+            id: newRectId(),
             x: Math.round(spawnX),
             y: Math.round(spawnY),
             w: 144,
