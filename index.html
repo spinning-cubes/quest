@@ -1072,34 +1072,11 @@
         crouchFactor * (PLAYER_STANDING_LEG_HEIGHT - PLAYER_CROUCH_LEG_HEIGHT);
     }
 
-    // Height of the pivot drawPlayer spins around, measured up from the feet.
-    // applyPlayerTilt turns the body about the same point so the feet stay
-    // planted on the surface instead of sliding around an arc.
-    function getPlayerPivotAboveFeet(crouchFactor) {
-      return getPlayerLegHeight(crouchFactor) + PLAYER_LEG_WIDTH / 2 +
-        PLAYER_HEAD_RADIUS + PLAYER_HEAD_GAP / 2;
-    }
-
-    // Leans the player onto the surface they are standing on. Applying the same
-    // increment to position and rotation is what makes the motion read as a
-    // body pivoting rather than the whole sprite being skewed.
+    // Eases the body onto the surface it is standing on. No position fixup is
+    // needed: the renderer already spins about the feet, and player.x/y is the
+    // foot contact point that collision, distance and the network rely on.
     function applyPlayerTilt(targetRotation) {
-      if (targetRotation === player.rotation) return;
-
-      const pivotX = player.x;
-      const pivotY = player.y - getPlayerPivotAboveFeet(player.crouchFactor);
-      const oldRotation = player.rotation;
-      player.rotation += (targetRotation - oldRotation) * TILT_PIVOT_TWEEN;
-
-      const delta = player.rotation - oldRotation;
-      if (delta === 0) return;
-
-      const cos = Math.cos(delta);
-      const sin = Math.sin(delta);
-      const dx = player.x - pivotX;
-      const dy = player.y - pivotY;
-      player.x = pivotX + dx * cos - dy * sin;
-      player.y = pivotY + dx * sin + dy * cos;
+      player.rotation += (targetRotation - player.rotation) * TILT_PIVOT_TWEEN;
     }
 
     // posX/posY default to the simulated position; the local player passes the
@@ -1181,13 +1158,15 @@
       // Your own runner stays solid so you can pick yourself out of a crowd.
       ctx.globalAlpha = p === player ? 0.75 : 0.45;
 
-      // Apply rotation
-      const rotation = p.rotation || 0;
-      const centerX = hipX;
-      const centerY = hipY - headRadius - headGap / 2;
-      ctx.translate(centerX, centerY);
-      ctx.rotate(rotation);
-      ctx.translate(-centerX, -centerY);
+      // Spin about the contact point between the feet, not the middle of the
+      // body, so a runner leaning on a slope pivots on their footing instead
+      // of sinking through the surface. The leg IK targets above are in
+      // unrotated screen space, so head and legs swing over as one piece.
+      const pivotX = hipX;
+      const pivotY = posY - camY;
+      ctx.translate(pivotX, pivotY);
+      ctx.rotate(p.rotation || 0);
+      ctx.translate(-pivotX, -pivotY);
 
       const playerColor = p.color || PALETTE.player;
       ctx.fillStyle = playerColor;
