@@ -1719,8 +1719,8 @@
 
     function drawRemotePlayer(rp, camX, camY = 0) {
       sampleRemote(rp);
-      if (!rp.isAlive || rp.isEditor || rp.cursorX === undefined) return;
-      drawPlayer(rp, camX, camY);
+      if (!rp.isAlive || rp.isEditor) return;
+      drawPlayer(rp, camX, camY, rp.x, rp.y);
     }
 
     function drawRemoteCursor(rp, camX, camY = 0) {
@@ -2058,6 +2058,14 @@
       ctx.scale(CAMERA_ZOOM, CAMERA_ZOOM);
 
       renderWorldObjects(renderCameraX, renderCameraY);
+
+      // Draw alive remote players in the game world
+      remotePlayers.forEach((rp) => {
+        sampleRemote(rp);
+        if (rp.isAlive && !rp.isEditor) {
+          drawRemotePlayer(rp, renderCameraX, renderCameraY);
+        }
+      });
 
       ctx.restore();
 
